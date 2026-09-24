@@ -1,0 +1,20 @@
+# third-party binaries (download with: see README, "Setup")
+tools/vampire
+tools/*.zip
+
+# compiled Lean artifacts (rebuild with: see README, "Setup")
+*.olean
+*.ilean
+
+# large, reproducible data (regenerate from megalodon-lean4's sexprinfo export)
+data/corpus.sexpr
+
+# run outputs
+results/*.jsonl
+results/*.log
+__pycache__/
+*.pyc
+
+# never commit credentials
+.env
+*_api_key*
