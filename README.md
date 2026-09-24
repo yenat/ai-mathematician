@@ -8,7 +8,7 @@ Built phase by phase:
 
 | Phase | Components | Status |
 |---|---|---|
-| 1 | Search + Download · ATP (Vampire) · ITP (Lean 4) · LLM proposer with Lean-error feedback | Deterministic pipeline done and benchmarked; LLM plug-in in progress |
+| 1 | Search + Download · ATP (Vampire) · ITP (Lean 4) · LLM proposer with Lean-error feedback | Deterministic pipeline and LLM loop benchmarked; Download not yet built |
 | 2 | Inference controller (LLM + Hyperon) · Math Atomspace working memory / long-term memory · research papers → long-term memory | Not started |
 | 3 | PLN (probabilistic logic networks) feeding the inference controller | Not started |
 
@@ -18,9 +18,14 @@ On the 999-theorem reference library (Megalodon's `100thms_12.mg`,
 translated to Lean 4 by the companion
 [megalodon-lean4](https://github.com/yenat/megalodon-lean4) translator), with **no LLM**:
 
-**418 / 999 theorems proved (41.8%)**, every one kernel-checked.
+| | Proved | Rate |
+|---|---|---|
+| Deterministic pipeline, no LLM | 418 / 999 | 41.8% |
+| + LLM feedback loop on reconstruction failures | **469 / 999** | **46.9%** |
 
-Full breakdown and failure analysis: `results/phase1_baseline_v1.md`.
+Every one kernel-checked; the 51 LLM-found proofs were also re-verified
+independently. Details: `results/phase1_baseline_v1.md` (baseline, failure
+analysis) and `results/phase1_llm_v1.md` (model comparison, cascade).
 
 ### What "proved" means here
 
@@ -64,9 +69,10 @@ goal ──> Search ──> ranked facts ──> Vampire (untrusted) ──> pre
   Lean's `grind` automation can work on it.
 - `phase1/itp.py`, `phase1/prover.py`: build Lean proof attempts, check
   them, apply the statement check and leak guard.
-- `phase1/llm.py`: **experimental.** LLM proposes a Lean tactic script,
-  sees Lean's error on failure, retries (the feedback loop from the design
-  sketch).
+- `phase1/llm.py`: LLM proposes a Lean tactic script, sees Lean's
+  error on failure, retries (the feedback loop from the design sketch).
+  `llm_experiment.py` runs it over a results file; `recheck.py`
+  independently re-verifies every LLM-found proof.
 
 ## Setup
 
