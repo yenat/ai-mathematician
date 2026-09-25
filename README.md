@@ -16,16 +16,19 @@ Built phase by phase:
 
 On the 999-theorem reference library (Megalodon's `100thms_12.mg`,
 translated to Lean 4 by the companion
-[megalodon-lean4](https://github.com/yenat/megalodon-lean4) translator), with **no LLM**:
+[megalodon-lean4](https://github.com/yenat/megalodon-lean4) translator):
 
 | | Proved | Rate |
 |---|---|---|
-| Deterministic pipeline, no LLM | 418 / 999 | 41.8% |
-| + LLM feedback loop on reconstruction failures | **469 / 999** | **46.9%** |
+| Deterministic pipeline v1, no LLM | 418 / 999 | 41.8% |
+| + LLM feedback loop on reconstruction failures | 469 / 999 | 46.9% |
+| Deterministic v2 (strategies distilled from LLM proofs + timeout fix), no LLM | **451 / 999** | **45.1%** |
+| v2 + LLM proofs | **484 / 999** | **48.4%** |
 
 Every one kernel-checked; the 51 LLM-found proofs were also re-verified
 independently. Details: `results/phase1_baseline_v1.md` (baseline, failure
-analysis) and `results/phase1_llm_v1.md` (model comparison, cascade).
+analysis), `results/phase1_llm_v1.md` (model comparison, cascade) and
+`results/phase1_v2.md` (distilled strategies, next steps).
 
 ### What "proved" means here
 

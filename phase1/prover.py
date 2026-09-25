@@ -28,12 +28,27 @@ def _lean_name(name):
     return f"«{name}»"
 
 
-def candidate_tactics(premises, defs):
-    """Deterministic battery, cheapest first. Each entry: (label, script)."""
+def candidate_tactics(premises, defs, goal_defs=None):
+    """Deterministic battery, cheapest first. Each entry: (label, script).
+
+    The `goal-*` and `ext-*` strategies were distilled from the 51 proofs
+    the LLM found for theorems this battery originally missed. They encode
+    the three mechanical patterns those proofs kept using:
+      * unfold the GOAL's own definitions -- only in the goal, not in the
+        premises -- then introduce what that reveals (e.g. `Subq A B`
+        unfolds to `forall z, In z A -> In z B`, so intro z and z ∈ A);
+      * turn encoded or/and/ex from elimination lemmas native and let
+        grind case-split on them;
+      * prove set equality through extensionality (`set_ext`).
+    Unfolding everything everywhere, as `prem-unfold-grind` does, rewrites
+    the premises too, which is what broke these cases before."""
     P = [_lean_name(p) for p in premises]
     D = [_lean_name(d) for d in defs]
+    G = [_lean_name(d) for d in (goal_defs if goal_defs is not None else defs)]
     haves = "".join(f"have hp{i} := @{p}\n" for i, p in enumerate(P))
     unfold = ", ".join([BRIDGE] + D) if D else BRIDGE
+    goal_unfold = (f"try simp only [{', '.join(G)}]\ntry intros\n"
+                   f"try simp only [{BRIDGE}] at *\n") if G else ""
     cands = [
         ("intro-grind", f"intros\ntry simp only [{BRIDGE}] at *\ngrind"),
         ("unfold-grind", f"intros\ntry simp only [{unfold}] at *\ngrind"),
@@ -47,6 +62,19 @@ def candidate_tactics(premises, defs):
             ("solve_by_elim",
              f"intros\nsolve_by_elim (maxDepth := 8) [{', '.join(P)}]"),
         ]
+        if G:
+            cands += [
+                ("goal-unfold-grind",
+                 f"intros\n{haves}try simp only [{BRIDGE}] at *\n{goal_unfold}grind"),
+                ("goal-unfold-sbe",
+                 f"intros\n{goal_unfold}solve_by_elim (maxDepth := 10) [{', '.join(P)}]"),
+            ]
+    # set equality by extensionality: eq set X Y  <-  Subq X Y, Subq Y X
+    cands.append(
+        ("ext-grind",
+         f"intros\n{haves}try simp only [{BRIDGE}] at *\n"
+         f"refine (b_eq set _ _).mp (set_ext _ _ ?_ ?_)\n"
+         f"all_goals (try simp only [Subq]\n  intros\n  try simp only [{BRIDGE}] at *\n  grind)"))
     return cands
 
 
@@ -87,6 +115,14 @@ class Prover:
                 return vf, sorted(set(goal_defs) | set(vdefs)), f"Theorem@{k}"
         return facts[:8], goal_defs, status
 
+    def goal_defs(self, goal):
+        """Definitions the goal statement itself mentions (not the logical
+        connectives, which the bridge lemmas handle)."""
+        return sorted(s for s in goal.stmt_syms
+                      if s in self.by_name and self.by_name[s].kind == "DEF"
+                      and s not in ("True", "False", "not", "and", "or",
+                                    "iff", "eq", "neq", "ex"))
+
     def _def_of(self, vampire_id):
         if not vampire_id.endswith("_def"):
             return None
@@ -95,7 +131,7 @@ class Prover:
                 return d.name
         return None
 
-    def attempt_batch(self, goal, cands, timeout=120):
+    def attempt_batch(self, goal, cands, timeout=120, single_timeout=60):
         """Check every candidate for one goal in a single Lean process.
         Returns list of (label, ok, reason)."""
         sig = self.sigs[goal.name]
@@ -125,8 +161,23 @@ class Prover:
                                env={**os.environ, "LEAN_PATH": LIB})
             out = r.stdout + r.stderr
         except subprocess.TimeoutExpired:
-            return [(label, False, "batch timeout") for _, label in att_names]
-        finally:
+            os.unlink(path)
+            # One slow candidate used up the whole batch's time, taking the
+            # others down with it (43 of 140 baseline reconstruction failures
+            # were exactly this). Retry each candidate alone, with its own
+            # budget, so a fast proof is never killed by a slow neighbour.
+            if len(cands) == 1:
+                return [(cands[0][0], False, "timeout")]
+            results = []
+            for c in cands:
+                r1 = self.attempt_batch(goal, [c], timeout=single_timeout)
+                results += r1
+                if r1[0][1]:
+                    results += [(c2[0], False, "skipped: already proved")
+                                for c2 in cands[len(results):]]
+                    break
+            return results
+        else:
             os.unlink(path)
 
         # map error lines back to the attempt that contains them
@@ -183,13 +234,14 @@ class Prover:
 
     def prove(self, goal, extra_candidates=()):
         premises, defs, vstatus = self.hints(goal)
-        cands = candidate_tactics(premises, defs)
+        cands = candidate_tactics(premises, defs, self.goal_defs(goal))
         if not vstatus.startswith("Theorem"):
             # Without a Vampire proof, premise-heavy grind attempts succeeded
             # 0/19 times on the sample while costing ~30s each; keep only
             # the cheap, fast-failing strategies.
             cands = [c for c in cands
-                     if c[0] in ("intro-grind", "unfold-grind", "solve_by_elim")]
+                     if c[0] in ("intro-grind", "unfold-grind", "solve_by_elim",
+                                 "goal-unfold-sbe", "ext-grind")]
         cands += list(extra_candidates)
         results = self.attempt_batch(goal, cands)
         winner = next((lbl for lbl, ok, _ in results if ok), None)
