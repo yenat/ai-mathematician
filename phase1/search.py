@@ -53,6 +53,11 @@ class Search:
             for t in self._toks(d.name):
                 tdf[t] += 1
         self.tidf = {t: math.log((n + 1) / (c + 1)) for t, c in tdf.items()}
+        fdf = defaultdict(int)
+        for d in decls:
+            for f in d.feats:
+                fdf[f] += 1
+        self.fidf = {f: math.log((n + 1) / (c + 1)) for f, c in fdf.items()}
 
     @staticmethod
     def _toks(name):
@@ -97,7 +102,45 @@ class Search:
                 votes[p] += sim             # and whatever its proof used
         return votes
 
-    def rank(self, goal_index, limit=32, name_w=0.0, recency_w=1.0):
+    def _nb(self, goal, goal_index, sigma=10.0, penalty=-4.0, self_w=1.0):
+        """Naive Bayes premise selection (Sledgehammer's MaSh): how likely is
+        fact p to be used, given the goal's features, judging from which
+        facts the proofs of EARLIER theorems used and what those theorems
+        looked like. Each fact also counts as one example of itself (a
+        fact is 'about' its own features).
+
+          score(p) = ln t_p + sum_{f in goal} w_f * ( ln(sigma * s_pf / t_p)
+                                                      if s_pf > 0 else penalty )
+        where t_p = examples using p, s_pf = those with feature f."""
+        t = defaultdict(float)
+        s = defaultdict(lambda: defaultdict(float))
+        for d in self.decls[:goal_index]:
+            if d.kind in ("THM", "AXIOM"):
+                t[d.name] += self_w
+                for f in d.feats:
+                    s[d.name][f] += self_w
+            if d.kind == "THM":
+                for p in d.proof_deps:
+                    t[p] += 1
+                    sp = s[p]
+                    for f in d.feats:
+                        sp[f] += 1
+        F = [(f, self._fw(f)) for f in goal.feats]
+        out = {}
+        for p, tp in t.items():
+            sp = s[p]
+            sc = math.log(tp)
+            for f, w in F:
+                v = sp.get(f)
+                sc += w * (math.log(sigma * v / tp) if v else penalty)
+            out[p] = sc
+        return out
+
+    def _fw(self, f):
+        return self.fidf.get(f, 1.0)
+
+    def rank(self, goal_index, limit=32, name_w=0.0, recency_w=1.0,
+             knn_w=1.5, nb_w=3.0, nb_decay=8.0, nb_args=None):
         """Return up to `limit` (name, score) pairs, best first, drawn only
         from declarations strictly before the goal."""
         goal = self.decls[goal_index]
@@ -121,7 +164,14 @@ class Search:
         top = max(knn.values(), default=0.0)
         if top > 0:
             for name, v in knn.items():
-                scores[name] += 1.5 * v / top
+                scores[name] += knn_w * v / top
+        if nb_w:
+            # rank-based bonus: naive Bayes scores are log-odds on their own
+            # scale, so blend by position rather than raw value
+            nb = sorted(self._nb(goal, goal_index, **(nb_args or {})).items(),
+                        key=lambda t: -t[1])
+            for r, (name, _) in enumerate(nb):
+                scores[name] += nb_w / (1.0 + r / nb_decay)
         allowed = {d.name for d in self.decls[:goal_index]}
         ranked = sorted(((n, s) for n, s in scores.items() if n in allowed),
                         key=lambda t: -t[1])

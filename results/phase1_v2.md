@@ -49,11 +49,43 @@ So for non-induction theorems the bottleneck is **Search** (premise
 selection); for induction the missing piece is the induction predicate
 itself, which better facts do not supply.
 
+## Learned Search (2026-09-25, no LLM)
+
+Added a naive Bayes premise selector (Sledgehammer's MaSh), trained only
+on proofs of theorems BEFORE the goal, over richer statement features
+(`library._features`: constants plus shape, e.g. `concl:eq>add_SNo`,
+`hyp:SNo`). Blended with the existing Search (`search.Search._nb`).
+Settings were tuned only on the first half of the library; the
+differences between settings were small (about 1 point).
+
+Recall (`phase1/eval_search.py`), "all facts the real proof cited found":
+
+| Set | old @32 | new @32 | old @64 | new @64 |
+|---|---|---|---|---|
+| second half (untuned) | 31.9% | 36.2% | 46.4% | 51.8% |
+| 327 non-induction failures | 12.2% | 19.6% | 22.6% | 33.0% |
+
+End to end on the 441 theorems where Vampire had found no proof
+(`phase1/rerun_vampire.py`, then `rebuild_failures.py`):
+
+- Vampire now proves 38 of them. Control: with the old ranking, Vampire
+  proves 7 of those 38 in a rerun, so about 31 are due to the new Search
+  and the rest to Vampire's timing variation.
+- Lean rebuilds **21 / 38** as kernel-checked, leak-guarded proofs. Of
+  those 21, the old ranking also reaches 4 on a rerun (SNoLe_ref,
+  SNo_foil_mm, Pi_SNo_S, divides_int_prime_nat_eq).
+
+| | Proved | Rate |
+|---|---|---|
+| v2, no LLM | 451 / 999 | 45.1% |
+| v2 + learned Search, no LLM | **472 / 999** | **47.2%** |
+| ... + LLM proofs from v1 | **505 / 999** | **50.5%** |
+
+Same caveat as above: these are cumulative gains, not yet a fresh full rerun.
+
 ## Next
 
-1. Better Search: a learned ranker trained on which facts earlier proofs
-   used (MaSh-style, strictly earlier theorems only), measured by recall
-   and oracle-style Vampire checks. Embeddings only if that falls short.
-2. Induction without the LLM: apply the principle, then prove the cases.
+1. Induction without the LLM: apply the principle, then prove the cases.
+2. The 17 Vampire proofs Lean could not rebuild (`results/rebuild_nb.log`).
 3. One full 999 rerun with everything combined.
 4. One budgeted LLM pass on what remains, with token logging and a cap.

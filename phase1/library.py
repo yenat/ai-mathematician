@@ -33,6 +33,7 @@ class Decl:
     body: object = None        # DEF body, or THM proof term
     stmt_syms: set = field(default_factory=set)   # constants in the statement
     proof_deps: set = field(default_factory=set)  # facts the original proof cited
+    feats: set = field(default_factory=set)       # structural features, see _features
 
 
 def _collect(node, hash_to_name, prim_to_name, out, known_only=False):
@@ -59,6 +60,68 @@ def _collect(node, hash_to_name, prim_to_name, out, known_only=False):
     for child in node[1:]:
         if isinstance(child, list):
             _collect(child, hash_to_name, prim_to_name, out, known_only)
+
+
+def _head(node, names):
+    """Name of the constant at the head of a term ('_var' for a bound
+    variable, the node tag for anything else)."""
+    while node[0] in ("AP", "TPAP"):
+        node = node[1]
+    if node[0] == "TMH":
+        return names.get(node[1], "?")
+    return "_var" if node[0] == "DB" else node[0]
+
+
+def _features(stmt, names):
+    """Features of a statement for learned premise selection, in the style
+    of MaSh: its constants, plus shallow shape -- which constant is applied
+    to which (`add_SNo>add_SNo`), and what the conclusion and hypotheses
+    are about (`concl:eq`, `concl:eq>add_SNo`, `hyp:SNo`). Symbols alone
+    cannot tell `x + y = y + x` from `SNo x -> SNo (x + y)`; shape can."""
+    out = set()
+
+    def walk(node, outer_ap=False):
+        if not isinstance(node, list) or not node:
+            return
+        tag = node[0]
+        if tag == "TMH":
+            out.add(names.get(node[1], "?"))
+            return
+        if tag == "AP" and not outer_ap:
+            # maximal application: unroll head and arguments
+            args, f = [], node
+            while f[0] == "AP":
+                args.append(f[2])
+                f = f[1]
+            h = _head(f, names)
+            for a in args:
+                out.add(f"{h}>{_head(a, names)}")
+            walk(f)
+            for a in args:
+                walk(a)
+            return
+        for child in node[1:]:
+            walk(child)
+
+    walk(stmt)
+    # strip the outer quantifier / hypothesis chain
+    node, hyps = stmt, []
+    while isinstance(node, list) and node and node[0] in ("ALL", "IMP"):
+        if node[0] == "IMP":
+            hyps.append(node[1])
+        node = node[-1]
+    if isinstance(node, list) and node:
+        h = _head(node, names)
+        out.add(f"concl:{h}")
+        if node[0] == "AP":
+            a = node
+            while a[0] == "AP":
+                out.add(f"concl:{h}>{_head(a[2], names)}")
+                a = a[1]
+    for hy in hyps:
+        if isinstance(hy, list) and hy:
+            out.add(f"hyp:{_head(hy, names)}")
+    return out
 
 
 def load(path):
@@ -105,6 +168,8 @@ def load(path):
             _collect(pf, hash_to_name, prim_to_name, d.proof_deps, known_only=True)
             add(d)
             hash_to_name[d.hash] = name
+    for d in decls:
+        d.feats = _features(d.body if d.kind == "DEF" else d.stmt, hash_to_name)
     return decls
 
 
