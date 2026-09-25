@@ -83,9 +83,42 @@ End to end on the 441 theorems where Vampire had found no proof
 
 Same caveat as above: these are cumulative gains, not yet a fresh full rerun.
 
+## Induction without the LLM (2026-09-25)
+
+`phase1/induction.py` builds the induction predicate itself: it reads the
+goal as a statement P(x) about one of its variables and writes out the
+cases of each available principle (nat_ind, nat_complete_ind,
+ordinal_ind, SNoLev_ind, finite_ind, In_ind), each as a stand-alone
+goal for Vampire. Only principles proved before the goal are used. In
+Lean: introduce everything, revert all but x and its guard, `apply` the
+principle, and prove each case with the usual battery.
+
+On the 114 induction theorems where Vampire had found no proof
+(`phase1/try_induction.py`, Vampire only):
+
+| Premises | All cases proved by Vampire |
+|---|---|
+| none (plain Vampire, v1 oracle test) | 2 / 40 sampled (5%) |
+| split + facts the original proof cited (ceiling) | 34 / 114 |
+| split + Search's facts (real setting) | 25 / 114 |
+
+Lean (`phase1/rebuild_induction.py`) proves **18 / 25**, all re-verified
+in a fresh Lean run. Among them: commutativity of addition and
+multiplication on naturals, associativity of both, and closure of
+naturals under +, *, exponentiation. Each (case, tactic) is first tried
+as its own declaration because Lean's heartbeat budget is per
+declaration; putting all of them in one proof let a slow failure starve
+the rest (16 / 25 before that fix).
+
+| | Proved | Rate |
+|---|---|---|
+| + induction, no LLM | **490 / 999** | **49.0%** |
+| ... + LLM proofs from v1 | **523 / 999** | **52.3%** |
+
 ## Next
 
-1. Induction without the LLM: apply the principle, then prove the cases.
+1. The 89 induction theorems Vampire could not split, and the 7 splits
+   Lean could not rebuild (`results/induction_lean.log`).
 2. The 17 Vampire proofs Lean could not rebuild (`results/rebuild_nb.log`).
 3. One full 999 rerun with everything combined.
 4. One budgeted LLM pass on what remains, with token logging and a cap.

@@ -23,8 +23,9 @@ translated to Lean 4 by the companion
 | Deterministic pipeline v1, no LLM | 418 / 999 | 41.8% |
 | + LLM feedback loop on reconstruction failures | 469 / 999 | 46.9% |
 | Deterministic v2 (strategies distilled from LLM proofs + timeout fix), no LLM | 451 / 999 | 45.1% |
-| v2 + learned Search (MaSh-style naive Bayes), no LLM | **472 / 999** | **47.2%** |
-| ... + LLM proofs | **505 / 999** | **50.5%** |
+| v2 + learned Search (MaSh-style naive Bayes), no LLM | 472 / 999 | 47.2% |
+| + automatic induction, no LLM | **490 / 999** | **49.0%** |
+| ... + LLM proofs | **523 / 999** | **52.3%** |
 
 Every one kernel-checked; the 51 LLM-found proofs were also re-verified
 independently. Details: `results/phase1_baseline_v1.md` (baseline, failure
