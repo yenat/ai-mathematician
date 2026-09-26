@@ -16,10 +16,12 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 
 from atp import THF, attach_prim_indices, run_vampire, Unsupported, ident
 from itp import LEAN, LIB, BRIDGE, _GUARD, leak_free
 from search import Search
+from induction import Inductor, lean_script
 
 
 def _lean_name(name):
@@ -69,12 +71,15 @@ def candidate_tactics(premises, defs, goal_defs=None):
                 ("goal-unfold-sbe",
                  f"intros\n{goal_unfold}solve_by_elim (maxDepth := 10) [{', '.join(P)}]"),
             ]
-    # set equality by extensionality: eq set X Y  <-  Subq X Y, Subq Y X
+    # set equality by extensionality: eq set X Y  <-  Subq X Y, Subq Y X.
+    # One line, each step parenthesised: a multi-line block inside `( )`
+    # did not parse (column rules), so this strategy never ran before.
     cands.append(
         ("ext-grind",
          f"intros\n{haves}try simp only [{BRIDGE}] at *\n"
          f"refine (b_eq set _ _).mp (set_ext _ _ ?_ ?_)\n"
-         f"all_goals (try simp only [Subq]\n  intros\n  try simp only [{BRIDGE}] at *\n  grind)"))
+         f"all_goals ((try simp only [Subq]); intros; "
+         f"(try simp only [{BRIDGE}] at *); grind)"))
     return cands
 
 
@@ -87,33 +92,59 @@ class Prover:
         self.thf = THF(decls)
         attach_prim_indices(self.thf, corpus_path)
         self.sigs = statements
+        self.inductor = Inductor(decls)
 
-    def hints(self, goal, slices=(16, 32, 64), vampire_timeout=5):
-        """Return (premises, defs, vampire_status).
+    def premise_sets(self, goal, slices=(16, 32, 64), vampire_timeout=5):
+        """Return (premise_sets, defs, vampire_status).
 
-        Tries Vampire on several premise-slice sizes, smallest first: the
-        failure diagnosis showed Vampire often fails from too MANY
-        irrelevant premises rather than missing ones, so a small slice is
-        tried before larger, safer ones. First proof found wins."""
+        Runs Vampire on several premise-slice sizes: the failure diagnosis
+        showed Vampire often fails from too MANY irrelevant premises rather
+        than missing ones, so small slices matter as much as large ones.
+        Every slice is tried; each proof found contributes the set of facts
+        it used. Without any proof, the one set is Search's top facts."""
         ranked = [n for n, _ in self.search.rank(goal.index, limit=max(slices))]
         facts = [n for n in ranked if self.by_name[n].kind in ("THM", "AXIOM")]
         goal_defs = sorted(s for s in goal.stmt_syms
                            if s in self.by_name and self.by_name[s].kind == "DEF"
                            and s not in ("True", "False", "not", "and", "or",
                                          "iff", "eq", "neq", "ex"))
-        status = "skipped"
+        status, found = "skipped", []
         for k in slices:
             try:
                 text, ids, _ = self.thf.problem(goal, ranked[:k])
             except Unsupported:
                 status = "unsupported"
                 break
-            status, used = run_vampire(text, timeout=vampire_timeout)
-            if status == "Theorem":
+            st, used = run_vampire(text, timeout=vampire_timeout)
+            if st == "Theorem":
                 vf = [ids[u] for u in used if u in ids]
-                vdefs = sorted({self._def_of(u) for u in used} - {None})
-                return vf, sorted(set(goal_defs) | set(vdefs)), f"Theorem@{k}"
-        return facts[:8], goal_defs, status
+                vdefs = {self._def_of(u) for u in used} - {None}
+                found.append((k, vf, vdefs))
+            elif not found:
+                status = st
+        if found:
+            # Vampire's proof is not unique: different slices can yield
+            # different proofs, and the facts one uses may suit Lean's
+            # tactics better than another's (6 regressions in a v2 run came
+            # from exactly this). Keep every distinct premise set.
+            sets, defs = [], set(goal_defs)
+            for _, vf, vdefs in found:
+                if vf not in sets:
+                    sets.append(vf)
+                defs |= vdefs
+            # A proof from definitions alone (0-1 facts) is often one Lean's
+            # tactics cannot replay by unfolding; give them Search's top
+            # facts as well (nat_ordsucc, equip_sym).
+            if all(len(s) < 2 for s in sets) and facts[:8] not in sets:
+                sets.append(facts[:8])
+            return sets, sorted(defs), "Theorem@" + ",".join(
+                str(k) for k, _, _ in found)
+        return [facts[:8]], goal_defs, status
+
+    def hints(self, goal, **kw):
+        """(premises, defs, status) with the first premise set only."""
+        sets, defs, status = self.premise_sets(goal, **kw)
+        return sets[0], defs, status
 
     def goal_defs(self, goal):
         """Definitions the goal statement itself mentions (not the logical
@@ -131,7 +162,8 @@ class Prover:
                 return d.name
         return None
 
-    def attempt_batch(self, goal, cands, timeout=120, single_timeout=60):
+    def attempt_batch(self, goal, cands, timeout=120, single_timeout=60,
+                      max_retry_secs=480):
         """Check every candidate for one goal in a single Lean process.
         Returns list of (label, ok, reason)."""
         sig = self.sigs[goal.name]
@@ -169,7 +201,14 @@ class Prover:
             if len(cands) == 1:
                 return [(cands[0][0], False, "timeout")]
             results = []
+            deadline = time.time() + max_retry_secs
             for c in cands:
+                if time.time() > deadline:
+                    # bound the worst case: without this, 20 candidates x
+                    # single_timeout could hold one goal for 20+ minutes
+                    results += [(c2[0], False, "skipped: retry deadline")
+                                for c2 in cands[len(results):]]
+                    break
                 r1 = self.attempt_batch(goal, [c], timeout=single_timeout)
                 results += r1
                 if r1[0][1]:
@@ -232,9 +271,83 @@ class Prover:
             results.append((label, ok, "ok" if ok else f"leak {leak}"))
         return results
 
-    def prove(self, goal, extra_candidates=()):
-        premises, defs, vstatus = self.hints(goal)
+    # ---- induction (see induction.py) ------------------------------------
+
+    def _vampire_case(self, case, ranked, slices, timeout=5):
+        """Vampire on one induction case; the facts it used, or None."""
+        for k in slices:
+            try:
+                text, ids, _ = self.thf.problem(case, ranked[:k])
+            except Unsupported:
+                return None
+            status, used = run_vampire(text, timeout=timeout)
+            if status == "Theorem":
+                return [ids[u] for u in used if u in ids]
+        return None
+
+    def induction_split(self, goal, ranked=None, slices=(16, 32, 64)):
+        """First (principle, variable) split whose every case Vampire
+        proves from Search's facts. Returns a dict, or None."""
+        if ranked is None:
+            ranked = [n for n, _ in self.search.rank(goal.index, limit=max(slices))]
+        for pname, xi, gi, cases in self.inductor.splits(goal):
+            used = []
+            for c in cases:
+                u = self._vampire_case(c, ranked, slices)
+                if u is None:
+                    break
+                used.append(u)
+            if len(used) == len(cases):
+                return {"principle": pname, "x": xi, "guard": gi,
+                        "case_premises": used}
+        return None
+
+    def induction_lean(self, goal, split):
+        """Lean proof from a split, in two passes. Lean's heartbeat budget
+        is per declaration, so trying every tactic for every case inside
+        ONE proof lets a slow failing attempt starve the rest. Pass 1 tries
+        each (case, tactic) as its own declaration with the other cases
+        left as `sorry`; an attempt whose only defect is sorryAx closed its
+        case. Pass 2 assembles one winner per case into a single sorry-free
+        proof, which gets the full check. Returns (ok, why, script)."""
+        n, s = 0, goal.stmt
+        while isinstance(s, list) and s[0] in ("ALL", "IMP"):
+            n, s = n + 1, s[2]
+        args = (split["x"], split["guard"], split["principle"])
+        gdefs = self.goal_defs(goal)
+        case_tacs = [[t for _, t in candidate_tactics(p, gdefs, gdefs)]
+                     for p in split["case_premises"]]
+        probes = []
+        for k, tacs in enumerate(case_tacs):
+            for i, t in enumerate(tacs):
+                per_case = [["sorry"]] * len(case_tacs)
+                per_case = per_case[:k] + [[t]] + per_case[k + 1:]
+                probes.append((f"{k}:{i}", lean_script(n, *args, per_case)))
+        res = self.attempt_batch(goal, probes, timeout=600, single_timeout=120)
+        closes = {lbl for lbl, ok, why in res if ok or why == "sorryAx"}
+        winners = []
+        for k, tacs in enumerate(case_tacs):
+            i = next((i for i in range(len(tacs)) if f"{k}:{i}" in closes), None)
+            if i is None:
+                return False, f"no tactic closes case {k}", None
+            winners.append([tacs[i]])
+        script = lean_script(n, *args, winners)
+        (_, ok, why), = self.attempt_batch(goal, [("induction", script)],
+                                           timeout=300, single_timeout=300)
+        return ok, why, script
+
+    def prove(self, goal, extra_candidates=(), induction=True):
+        sets, defs, vstatus = self.premise_sets(goal)
+        premises = sets[0]
         cands = candidate_tactics(premises, defs, self.goal_defs(goal))
+        # further premise sets: their premise-using strategies only, and
+        # only if the first batch fails (a batch costs the sum of all its
+        # candidates, so adding them up front slowed easy goals ~10x)
+        second = []
+        for j, alt in enumerate(sets[1:], start=2):
+            second += [(f"{lbl}#{j}", s)
+                       for lbl, s in candidate_tactics(alt, defs, self.goal_defs(goal))
+                       if lbl.startswith(("prem-", "solve_by_elim", "goal-unfold"))]
         if not vstatus.startswith("Theorem"):
             # Without a Vampire proof, premise-heavy grind attempts succeeded
             # 0/19 times on the sample while costing ~30s each; keep only
@@ -245,6 +358,23 @@ class Prover:
         cands += list(extra_candidates)
         results = self.attempt_batch(goal, cands)
         winner = next((lbl for lbl, ok, _ in results if ok), None)
-        return {"goal": goal.name, "index": goal.index, "vampire": vstatus,
-                "premises": premises, "defs": defs,
-                "results": results, "proved_by": winner}
+        if not winner and second:
+            results += self.attempt_batch(goal, second)
+            winner = next((lbl for lbl, ok, _ in results if ok), None)
+        out = {"goal": goal.name, "index": goal.index, "vampire": vstatus,
+               "premises": premises, "premise_sets": sets, "defs": defs,
+               "results": results, "proved_by": winner}
+        if winner or not induction or vstatus.startswith("Theorem"):
+            return out
+        # Vampire found no direct proof: try induction, which supplies the
+        # predicate Vampire cannot invent.
+        split = self.induction_split(goal)
+        out["induction"] = split and split["principle"]
+        if split:
+            ok, why, script = self.induction_lean(goal, split)
+            label = f"induction:{split['principle']}"
+            out["results"].append((label, ok, why))
+            if ok:
+                out["proved_by"] = label
+                out["script"] = script
+        return out

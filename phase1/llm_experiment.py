@@ -18,7 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 from library import load
 from itp import load_statements
 from prover import Prover
-from llm import llm_rounds
+from llm import llm_rounds, usage_summary
+from dsp import dsp_rounds
 
 CORPUS = "../data/corpus.sexpr"
 
@@ -34,6 +35,12 @@ def main():
                     help="only failures where Vampire DID find a proof")
     ap.add_argument("--every", type=int, default=1,
                     help="take every Nth selected failure (fixed sample)")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="at most this many theorems")
+    ap.add_argument("--mode", choices=("direct", "dsp"), default="direct",
+                    help="direct: LLM writes Lean with error feedback; "
+                         "dsp: informal proof -> Lean outline -> automation "
+                         "fills gaps (rounds = repair rounds)")
     a = ap.parse_args()
 
     decls = load(CORPUS)
@@ -44,7 +51,7 @@ def main():
     todo = [r for r in rows if not r["proved_by"]]
     if a.vampire_only:
         todo = [r for r in todo if r["vampire"].startswith("Theorem")]
-    todo = todo[::a.every]
+    todo = todo[::a.every][:a.limit]
     print(f"{len(todo)} theorems, model={a.model}, rounds={a.rounds}", flush=True)
 
     def run(r):
@@ -54,8 +61,12 @@ def main():
             premises = [n for n, _ in prover.search.rank(g.index, limit=24)
                         if by[n].kind in ("THM", "AXIOM")][:16]
         t0 = time.time()
-        label, tr = llm_rounds(prover, g, premises, r["defs"],
-                               rounds=a.rounds, model=a.model)
+        if a.mode == "dsp":
+            label, tr = dsp_rounds(prover, g, premises, r["defs"],
+                                   repair_rounds=a.rounds, model=a.model)
+        else:
+            label, tr = llm_rounds(prover, g, premises, r["defs"],
+                                   rounds=a.rounds, model=a.model)
         return {"goal": g.name, "model": a.model, "proved_by": label,
                 "rounds_used": len(tr), "secs": round(time.time() - t0, 1),
                 "transcript": tr}
@@ -72,6 +83,7 @@ def main():
                   f"({res['secs']}s)", flush=True)
     print(f"\n{a.model}: proved {won}/{len(todo)} "
           f"({won/max(1,len(todo)):.0%}) in {time.time()-t0:.0f}s")
+    print("API usage (ledger):", usage_summary())
 
 
 if __name__ == "__main__":

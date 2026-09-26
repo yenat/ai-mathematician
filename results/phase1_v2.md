@@ -115,6 +115,50 @@ the rest (16 / 25 before that fix).
 | + induction, no LLM | **490 / 999** | **49.0%** |
 | ... + LLM proofs from v1 | **523 / 999** | **52.3%** |
 
+## Clean full run (2026-09-25)
+
+One run of the whole integrated pipeline (learned Search, Vampire, Lean
+battery, automatic induction) over all 999 theorems, held out as before,
+no LLM (`phase1/experiment.py 1 7 results/phase1_full_v2.jsonl`; resumed
+once with `--resume` after a restart to use more workers; same code
+throughout). Fixes made while running it, before the final launch:
+
+- `ext-grind` never parsed (multi-line block in parentheses); fixed.
+- Vampire proofs are not unique: all three premise slices now run and
+  every distinct premise set Vampire used is offered to Lean (29 of the
+  proofs below came from a second or third set); a proof from 0-1 facts
+  also gets Search's top 8 facts.
+- Candidates for extra premise sets run only if the first batch fails;
+  retries after a batch timeout are capped at 480 s per goal.
+
+**Result: 514 / 999 (51.4%), no LLM.** 999 distinct goals; 11,291 s wall
+clock for the final 733 goals at 7 workers.
+
+| | Proved | Rate |
+|---|---|---|
+| v1 full run, no LLM | 418 / 999 | 41.8% |
+| **v2 full run, no LLM** | **514 / 999** | **51.4%** |
+| v2 + the 51 LLM proofs from the v1 LLM stage (30 of them now also proved without LLM) | **535 / 999** | **53.5%** |
+
+The v2 run replaces the cumulative 490 / 523 estimates above, which
+stitched separate partial runs together.
+
+Against v1: 113 gained, 17 lost. The losses are Vampire finding a
+different proof (or none within 5 s) under the new ranking, e.g.
+`equip_sym`, `equip_atleastp`, `UPairE`, `binunionE`; the pipeline has
+run-to-run variation on borderline goals because of Vampire's time limit.
+
+First successful strategy per proved theorem: prem-grind 263,
+prem-unfold-grind 100, unfold-grind 50, solve_by_elim 38, intro-grind 33,
+induction 18 (nat_ind 13, In_ind 3, SNoLev_ind 2), ext-grind 9,
+goal-unfold-sbe 2, goal-unfold-grind 1.
+
+Unproved: 485. Vampire found a proof for 90 of them but Lean could not
+rebuild it; for 395 Vampire found none.
+
+Time per goal (single goal, as in use rather than benchmark): proved
+goals median 25 s, 90% within 76 s; failures give up at a median of 85 s.
+
 ## Next
 
 1. The 89 induction theorems Vampire could not split, and the 7 splits

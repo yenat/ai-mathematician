@@ -43,6 +43,62 @@ def _env():
     return env
 
 
+# ------------------------------------------------------------ spending cap
+# Every request that reaches the API -- retries included -- is appended to
+# a ledger with its token usage. Before each request the ledger is counted
+# under a file lock (safe across threads and processes); once it holds
+# LLM_CALL_CAP entries, no further request is sent. Start a fresh ledger
+# (LLM_LEDGER) for each budgeted run.
+LEDGER = os.environ.get("LLM_LEDGER",
+                        os.path.join(ROOT, "results", "llm_usage.jsonl"))
+CALL_CAP = int(os.environ.get("LLM_CALL_CAP", "100"))
+
+
+class BudgetExhausted(RuntimeError):
+    pass
+
+
+def _reserve(model):
+    """Count the ledger and record one call, atomically; raise if the cap
+    is reached. The entry is written BEFORE the request, so a crash
+    mid-request still counts against the budget."""
+    import fcntl
+    os.makedirs(os.path.dirname(LEDGER), exist_ok=True)
+    with open(LEDGER, "a+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        fh.seek(0)
+        n = sum(1 for l in fh if '"event": "call"' in l)
+        if n >= CALL_CAP:
+            raise BudgetExhausted(f"LLM call cap reached ({n}/{CALL_CAP})")
+        fh.write(json.dumps({"event": "call", "n": n + 1, "model": model,
+                             "time": time.strftime("%Y-%m-%dT%H:%M:%S")}) + "\n")
+        fh.flush()
+        return n + 1
+
+
+def _log_usage(n, model, usage, secs):
+    import fcntl
+    with open(LEDGER, "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        fh.write(json.dumps({"event": "usage", "n": n, "model": model,
+                             "prompt_tokens": usage.get("prompt_tokens"),
+                             "completion_tokens": usage.get("completion_tokens"),
+                             "secs": round(secs, 1)}) + "\n")
+
+
+def usage_summary(path=LEDGER):
+    calls, pt, ct = 0, 0, 0
+    if os.path.exists(path):
+        for l in open(path):
+            e = json.loads(l)
+            if e["event"] == "call":
+                calls += 1
+            else:
+                pt += e.get("prompt_tokens") or 0
+                ct += e.get("completion_tokens") or 0
+    return {"calls": calls, "prompt_tokens": pt, "completion_tokens": ct}
+
+
 def chat(messages, model=DEFAULT_MODEL, max_tokens=16000, temperature=0.2,
          retries=3):
     env = _env()
@@ -54,8 +110,11 @@ def chat(messages, model=DEFAULT_MODEL, max_tokens=16000, temperature=0.2,
             env["LLM_BASE_URL"].rstrip("/") + "/chat/completions", data=body,
             headers={"Authorization": f"Bearer {env['LLM_API_KEY']}",
                      "Content-Type": "application/json"})
+        n = _reserve(model)
+        t0 = time.time()
         try:
             r = json.load(urllib.request.urlopen(req, timeout=180))
+            _log_usage(n, model, r.get("usage") or {}, time.time() - t0)
             return r["choices"][0]["message"].get("content") or ""
         except (urllib.error.URLError, TimeoutError, KeyError) as e:
             if attempt == retries - 1:
