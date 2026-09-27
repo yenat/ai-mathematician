@@ -37,6 +37,9 @@ def main():
                     help="take every Nth selected failure (fixed sample)")
     ap.add_argument("--limit", type=int, default=None,
                     help="at most this many theorems")
+    ap.add_argument("--skip", type=int, default=0,
+                    help="skip the first N of the selected sample (e.g. ones "
+                         "already run in a smoke test)")
     ap.add_argument("--mode", choices=("direct", "dsp"), default="direct",
                     help="direct: LLM writes Lean with error feedback; "
                          "dsp: informal proof -> Lean outline -> automation "
@@ -51,7 +54,7 @@ def main():
     todo = [r for r in rows if not r["proved_by"]]
     if a.vampire_only:
         todo = [r for r in todo if r["vampire"].startswith("Theorem")]
-    todo = todo[::a.every][:a.limit]
+    todo = todo[::a.every][:a.limit][a.skip:]
     print(f"{len(todo)} theorems, model={a.model}, rounds={a.rounds}", flush=True)
 
     def run(r):

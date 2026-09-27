@@ -8,7 +8,7 @@ Built phase by phase:
 
 | Phase | Components | Status |
 |---|---|---|
-| 1 | Search + Download · ATP (Vampire) · ITP (Lean 4) · LLM proposer with Lean-error feedback | Deterministic pipeline and LLM loop benchmarked; Download not yet built |
+| 1 | Search + Download · ATP (Vampire) · ITP (Lean 4) · LLM proposer with Lean-error feedback · LLM informal proof → formal outline | Built and benchmarked; Download = retrieval from the library (external sources later) |
 | 2 | Inference controller (LLM + Hyperon) · Math Atomspace working memory / long-term memory · research papers → long-term memory | Not started |
 | 3 | PLN (probabilistic logic networks) feeding the inference controller | Not started |
 
@@ -22,13 +22,15 @@ translated to Lean 4 by the companion
 |---|---|---|
 | v1 full run, no LLM | 418 / 999 | 41.8% |
 | v1 + LLM feedback loop on reconstruction failures | 469 / 999 | 46.9% |
-| **v2 full run, no LLM** (learned Search, distilled strategies, all Vampire proofs, automatic induction) | **514 / 999** | **51.4%** |
-| **v2 + the v1 LLM proofs** | **535 / 999** | **53.5%** |
+| v2 full run, no LLM (learned Search, distilled strategies, all Vampire proofs, automatic induction) | 514 / 999 | 51.5% |
+| **v3 full run, no LLM** (+ Vampire 30 s with a 128-fact slice, second-line Lean strategies) | **563 / 999** | **56.4%** |
+| **v3 + the v1 LLM proofs** | **584 / 999** | **58.5%** |
 
-Every one kernel-checked; the 51 LLM-found proofs were also re-verified
-independently. Details: `results/phase1_baseline_v1.md` (baseline, failure
-analysis), `results/phase1_llm_v1.md` (model comparison, cascade) and
-`results/phase1_v2.md` (distilled strategies, next steps).
+Every one kernel-checked; all 563 v3 proofs and the 51 LLM-found proofs were
+also re-verified independently in fresh Lean runs. Details: `results/phase1_baseline_v1.md` (baseline, failure
+analysis), `results/phase1_llm_v1.md` (model comparison, cascade) 
+`results/phase1_v2.md` (v2 and v3 runs), `results/phase1_llm_dsp.md` (LLM
+informal→formal pass). Phase 1 report: `report/Phase1_Report_DRAFT.docx`.
 
 ### What "proved" means here
 
@@ -112,7 +114,7 @@ cd phase1
 python3 test_guard.py                 # leak-guard controls: must all pass
 python3 search.py ../data/corpus.sexpr   # Search recall vs. real proofs
 python3 experiment.py 33 6 out.jsonl  # sample: every 33rd theorem, 6 workers
-python3 experiment.py 1 6 out.jsonl   # full benchmark (~3h on 6 workers)
+python3 experiment.py 1 6 out.jsonl   # full benchmark (~7h on 6 workers)
 python3 try_llm.py <thm1,thm2> openai/gpt-oss-120b 4   # LLM loop, experimental
 ```
 
@@ -120,7 +122,8 @@ python3 try_llm.py <thm1,thm2> openai/gpt-oss-120b 4   # LLM loop, experimental
 
 - The library uses Megalodon's own foundations inside Lean (no Mathlib),
   so Lean's automation only works well after the bridge rewrite.
-- 140 theorems have a Vampire proof that Lean did not rebuild; 441 have
-  none. Induction-style proofs, which need an invented induction
-  predicate, are the hardest remaining class.
+- In the v3 run, 115 unproved theorems have a Vampire proof that Lean did
+  not rebuild (mostly needing higher-order premise instances); 321 have
+  none. Borderline goals vary between runs because of Vampire's time limit
+  (8 v2 successes were not reproduced in v3).
 - Category percentages use a vocabulary heuristic and are approximate.

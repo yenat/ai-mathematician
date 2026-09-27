@@ -74,6 +74,30 @@ def fill_gaps(script, premises, defs):
     return haves + s, script.count("sorry")
 
 
+def _trim_trailing(prover, goal, sketch, premises, defs, label, why, max_drop=3):
+    """Lean rejects a script that keeps going after the proof is complete
+    ("No goals to be solved"), e.g. a final `exact ...` after `simp` already
+    closed the goal. Retry with the last 1..max_drop top-level lines removed
+    (no LLM call); a shortened script must pass every check like any other.
+    Returns (ok, why, sketch, script) for the first that passes, else the
+    original failure."""
+    lines = sketch.rstrip().splitlines()
+    cands = []
+    for k in range(1, max_drop + 1):
+        if len(lines) - k < 1:
+            break
+        s = "\n".join(lines[:-k])
+        cands.append((f"{label}-trim{k}", s))
+    if not cands:
+        return False, why, sketch, fill_gaps(sketch, premises, defs)[0]
+    filled = [(lbl, fill_gaps(s, premises, defs)[0]) for lbl, s in cands]
+    res = prover.attempt_batch(goal, filled, timeout=300, single_timeout=120)
+    for (lbl, ok, w), (_, s), (_, f) in zip(res, cands, filled):
+        if ok:
+            return True, w, s, f
+    return False, why, sketch, fill_gaps(sketch, premises, defs)[0]
+
+
 def dsp_rounds(prover, goal, premises, defs, repair_rounds=1,
                model="openai/gpt-oss-120b", log=None):
     """Returns (proved_label or None, transcript). Uses at most
@@ -114,6 +138,9 @@ def dsp_rounds(prover, goal, premises, defs, repair_rounds=1,
         label = f"dsp-r{r}"
         (_, ok, why), = prover.attempt_batch(goal, [(label, script)],
                                              timeout=300, single_timeout=300)
+        if not ok and "No goals to be solved" in why:
+            ok, why, sketch, script = _trim_trailing(prover, goal, sketch,
+                                                     premises, defs, label, why)
         transcript.append({"stage": f"sketch{r}", "sketch": sketch,
                            "gaps": sketch.count("sorry"), "script": script,
                            "ok": ok, "why": why})

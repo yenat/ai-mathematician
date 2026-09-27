@@ -131,14 +131,14 @@ throughout). Fixes made while running it, before the final launch:
 - Candidates for extra premise sets run only if the first batch fails;
   retries after a batch timeout are capped at 480 s per goal.
 
-**Result: 514 / 999 (51.4%), no LLM.** 999 distinct goals; 11,291 s wall
+**Result: 514 / 999 (51.5%), no LLM.** 999 distinct goals; 11,291 s wall
 clock for the final 733 goals at 7 workers.
 
 | | Proved | Rate |
 |---|---|---|
 | v1 full run, no LLM | 418 / 999 | 41.8% |
-| **v2 full run, no LLM** | **514 / 999** | **51.4%** |
-| v2 + the 51 LLM proofs from the v1 LLM stage (30 of them now also proved without LLM) | **535 / 999** | **53.5%** |
+| **v2 full run, no LLM** | **514 / 999** | **51.5%** |
+| v2 + the 51 LLM proofs from the v1 LLM stage (30 of them now also proved without LLM) | **535 / 999** | **53.6%** |
 
 The v2 run replaces the cumulative 490 / 523 estimates above, which
 stitched separate partial runs together.
@@ -159,10 +159,46 @@ rebuild it; for 395 Vampire found none.
 Time per goal (single goal, as in use rather than benchmark): proved
 goals median 25 s, 90% within 76 s; failures give up at a median of 85 s.
 
+## Follow-up: new reconstruction strategies on the 90 (2026-09-26)
+
+`phase1/try_rebuild.py` tried new Lean strategies on the 90 goals where
+Vampire found a proof but v2 could not rebuild it, reusing the stored
+premise sets (no Vampire rerun, no LLM): premises as `grind` e-matching
+lemmas, higher `grind` effort (`splits`/`ematch`/`gen`), `simp_all` with
+premises and definitions, and `all_goals grind` so a goal already closed
+by `simp` is not an error.
+
+**6 / 90 rebuilt** (iff_refl, Repl_Empty, equip_0_Empty, form100_22_v1,
+add_SNo_Lt4, int_lin_comb_I), all re-verified in fresh Lean runs;
+`simp_all` with the premises was the most useful strategy. add_SNo_Lt4 was
+already among the v1 LLM proofs. Counting them: 520 / 999 (52.1%) without
+LLM, 540 / 999 (54.1%) with the v1 LLM proofs. This is a targeted run, not
+part of the single clean run, so the headline stays 514.
+
+The typical remaining failure is a proof that needs a higher-order
+instance of a premise, e.g. `UPairE`, which needs `Eps_i_ax` at a specific
+predicate: Vampire finds the instance, `grind` does not.
+
+## v3 clean full run (2026-09-26/27)
+
+Both follow-up levers built into the pipeline: Vampire 30 s per slice on
+16/32/64/128 facts (on the 395 v2 goals without a Vampire proof this found
+66 proofs, Lean rebuilt 32: `vampire30_*.jsonl`, `rebuild30_*.jsonl`), and
+`followup_tactics` as a second line after the battery. A larger budget for
+induction cases was tried and dropped (1 of 42 sampled splits).
+
+**Result: 563 / 999 (56.4%), no LLM**, single run
+(`phase1_full_v3.jsonl`, 6 workers, 24,960 s). All 563 re-verified in fresh
+Lean runs (`recheck_v3.jsonl`: 563 / 563). With the 51 v1 LLM proofs:
+584 / 999 (58.5%). Against v2: 57 gained, 8 lost (run-to-run variation).
+
+Unproved: 436; Vampire found a proof for 115 of them. Time per goal:
+proved median 42 s (90% within 157 s), failures median 190 s; the larger
+Vampire budget is the cost.
+
 ## Next
 
-1. The 89 induction theorems Vampire could not split, and the 7 splits
-   Lean could not rebuild (`results/induction_lean.log`).
-2. The 17 Vampire proofs Lean could not rebuild (`results/rebuild_nb.log`).
-3. One full 999 rerun with everything combined.
-4. One budgeted LLM pass on what remains, with token logging and a cap.
+1. The 115 goals with a Vampire proof Lean cannot rebuild: replay
+   Vampire's higher-order instantiations.
+2. Richer induction (generalising the goal, strengthening the predicate).
+3. LLM: few-shot examples, finer outlines, per-gap feedback.

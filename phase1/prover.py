@@ -83,6 +83,49 @@ def candidate_tactics(premises, defs, goal_defs=None):
     return cands
 
 
+BIG = "(splits := 24) (ematch := 12) (gen := 12)"
+
+
+def followup_tactics(premises, defs, goal_defs):
+    """Second-line strategies, tried only when the battery fails (they are
+    slower): premises as grind e-matching lemmas, more grind effort,
+    simp_all with premises and definitions, and `all_goals grind` so a goal
+    closed early by simp is not an error. Measured on the 90 v2 goals with a
+    Vampire proof but no reconstruction: 6 rebuilt (try_rebuild.py)."""
+    L = lambda n: f"«{n}»"  # noqa: E731
+    P = [L(p) for p in premises]
+    D = [L(d) for d in defs]
+    G = [L(d) for d in goal_defs]
+    haves = "".join(f"have hp{i} := @{p}\n" for i, p in enumerate(P))
+    unfold = ", ".join([BRIDGE] + D)
+    c = []
+    if P:
+        c += [
+            # premises as e-matching theorems rather than hypotheses
+            ("grind-lemmas", f"intros\n(try simp only [{BRIDGE}] at *)\ngrind [{', '.join(P)}]"),
+            ("grind-lemmas-unfold",
+             f"intros\n(try simp only [{unfold}] at *)\ngrind [{', '.join(P)}]"),
+            # more search effort
+            ("prem-grind-big", f"intros\n{haves}(try simp only [{BRIDGE}] at *)\nall_goals grind {BIG}"),
+            ("prem-unfold-grind-big",
+             f"intros\n{haves}(try simp only [{unfold}] at *)\nall_goals grind {BIG}"),
+            # simplifier with everything
+            ("simp_all-prem", f"intros\n{haves}simp_all [{unfold}]"),
+            # the base battery's grind strategies, tolerant of the goal
+            # already being closed by the simp step
+            ("prem-grind-ag", f"intros\n{haves}(try simp only [{BRIDGE}] at *)\nall_goals grind"),
+            ("prem-unfold-grind-ag", f"intros\n{haves}(try simp only [{unfold}] at *)\nall_goals grind"),
+        ]
+    c += [
+        ("unfold-grind-big", f"intros\n(try simp only [{unfold}] at *)\nall_goals grind {BIG}"),
+        ("unfold-grind-ag", f"intros\n(try simp only [{unfold}] at *)\nall_goals grind"),
+    ]
+    if G:
+        gu = f"(try simp only [{', '.join(G)}])\n(try intros)\n(try simp only [{BRIDGE}] at *)\n"
+        c.append(("goal-unfold-grind-big", f"intros\n{haves}(try simp only [{BRIDGE}] at *)\n{gu}all_goals grind {BIG}"))
+    return c
+
+
 class Prover:
     def __init__(self, decls, corpus_path, statements):
         self.decls = decls
@@ -94,14 +137,18 @@ class Prover:
         self.sigs = statements
         self.inductor = Inductor(decls)
 
-    def premise_sets(self, goal, slices=(16, 32, 64), vampire_timeout=5):
+    def premise_sets(self, goal, slices=(16, 32, 64, 128), vampire_timeout=30):
         """Return (premise_sets, defs, vampire_status).
 
         Runs Vampire on several premise-slice sizes: the failure diagnosis
         showed Vampire often fails from too MANY irrelevant premises rather
         than missing ones, so small slices matter as much as large ones.
         Every slice is tried; each proof found contributes the set of facts
-        it used. Without any proof, the one set is Search's top facts."""
+        it used. Without any proof, the one set is Search's top facts.
+
+        v3 budget: 30 s per slice and a 128-fact slice. v2 used 5 s and
+        16/32/64; on the 395 goals v2 found no Vampire proof for, this
+        budget found 66 (vampire30_*.jsonl), most at 128 facts."""
         ranked = [n for n, _ in self.search.rank(goal.index, limit=max(slices))]
         facts = [n for n in ranked if self.by_name[n].kind in ("THM", "AXIOM")]
         goal_defs = sorted(s for s in goal.stmt_syms
@@ -163,14 +210,14 @@ class Prover:
         return None
 
     def attempt_batch(self, goal, cands, timeout=120, single_timeout=60,
-                      max_retry_secs=480):
+                      max_retry_secs=480, heartbeats=200000):
         """Check every candidate for one goal in a single Lean process.
         Returns list of (label, ok, reason)."""
         sig = self.sigs[goal.name]
         parts = ["import Lean", "import Bridge",
                  "set_option Elab.async false",
                  "set_option maxRecDepth 8000",
-                 "set_option maxHeartbeats 200000",
+                 f"set_option maxHeartbeats {heartbeats}",
                  "set_option linter.unusedVariables false"]
         att_names = []
         for i, (label, script) in enumerate(cands):
@@ -209,7 +256,8 @@ class Prover:
                     results += [(c2[0], False, "skipped: retry deadline")
                                 for c2 in cands[len(results):]]
                     break
-                r1 = self.attempt_batch(goal, [c], timeout=single_timeout)
+                r1 = self.attempt_batch(goal, [c], timeout=single_timeout,
+                                        heartbeats=heartbeats)
                 results += r1
                 if r1[0][1]:
                     results += [(c2[0], False, "skipped: already proved")
@@ -348,6 +396,11 @@ class Prover:
             second += [(f"{lbl}#{j}", s)
                        for lbl, s in candidate_tactics(alt, defs, self.goal_defs(goal))
                        if lbl.startswith(("prem-", "solve_by_elim", "goal-unfold"))]
+        if vstatus.startswith("Theorem"):
+            # second-line strategies over every premise set (followup_tactics)
+            for j, ps in enumerate(sets, start=1):
+                second += [(f"{lbl}#{j}", s) for lbl, s in
+                           followup_tactics(ps, defs, self.goal_defs(goal))]
         if not vstatus.startswith("Theorem"):
             # Without a Vampire proof, premise-heavy grind attempts succeeded
             # 0/19 times on the sample while costing ~30s each; keep only
@@ -359,7 +412,8 @@ class Prover:
         results = self.attempt_batch(goal, cands)
         winner = next((lbl for lbl, ok, _ in results if ok), None)
         if not winner and second:
-            results += self.attempt_batch(goal, second)
+            results += self.attempt_batch(goal, second, timeout=300,
+                                          single_timeout=90, max_retry_secs=600)
             winner = next((lbl for lbl, ok, _ in results if ok), None)
         out = {"goal": goal.name, "index": goal.index, "vampire": vstatus,
                "premises": premises, "premise_sets": sets, "defs": defs,
