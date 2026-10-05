@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from library import load
 from itp import load_statements
-from prover import Prover, candidate_tactics, followup_tactics
+from prover import Prover, candidate_tactics, followup_tactics, apply_tactics, duper_tactics
 
 CORPUS = "../data/corpus.sexpr"
 src, workers, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
@@ -36,14 +36,20 @@ def script_of(r):
     gd = prover.goal_defs(g)
     table = dict(candidate_tactics(premises, r["defs"], gd))
     table.update(followup_tactics(premises, r["defs"], gd))
+    table.update(apply_tactics(premises, r["defs"]))
+    table.update(duper_tactics(premises, r["defs"]))
     return table[base]
 
 
 def run(r):
     t0 = time.time()
     script = script_of(r)
+    duper = r["proved_by"].startswith("duper")
     (_, ok, why), = prover.attempt_batch(by[r["goal"]], [("recheck", script)],
-                                         timeout=300, single_timeout=300)
+                                         timeout=600 if duper else 300,
+                                         single_timeout=600 if duper else 300,
+                                         heartbeats=1000000 if duper else 200000,
+                                         duper=duper)
     return {"goal": r["goal"], "proved_by": r["proved_by"], "ok": ok,
             "why": why if not ok else "", "secs": round(time.time() - t0, 1)}
 

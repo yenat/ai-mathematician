@@ -260,6 +260,17 @@ def llm_rounds(prover, goal, premises, defs, rounds=3, model=DEFAULT_MODEL,
         label = f"llm-r{r}"
         res = prover.attempt_batch(goal, [(label, script)])
         _, ok, why = res[0]
+        if not ok and "No goals to be solved" in why:
+            # the proof was complete before the script ended: retry without
+            # the trailing lines (no LLM call; must still pass every check)
+            lines = script.rstrip().splitlines()
+            trims = [(f"{label}-trim{k}", "\n".join(lines[:-k]))
+                     for k in (1, 2, 3) if len(lines) > k]
+            for (lbl, t_ok, t_why), (_, t_script) in zip(
+                    prover.attempt_batch(goal, trims), trims):
+                if t_ok:
+                    ok, why, script = True, t_why, t_script
+                    break
         transcript.append({"round": r, "script": script, "ok": ok, "why": why})
         if log:
             head = " | ".join(script.splitlines()[:4])

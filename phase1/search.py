@@ -178,6 +178,43 @@ class Search:
         return ranked[:limit]
 
 
+    def diverse_slices(self, goal_index, k=24, nn=4):
+        """Small premise sets from DIFFERENT signals, rather than prefixes of
+        one blended ranking (as Sledgehammer runs its MePo and MaSh filters
+        separately): a fact deep in the blend can be near the top of one
+        signal. Only facts before the goal, as everywhere.
+          nb   : top k by the naive Bayes score alone
+          knn  : facts cited by the proofs of the nn most similar earlier
+                 theorems (plus those theorems themselves)
+          sym  : top k facts by IDF symbol overlap alone
+        Returns {name: [fact, ...]}."""
+        goal = self.decls[goal_index]
+        allowed = {d.name for d in self.decls[:goal_index]
+                   if d.kind in ("THM", "AXIOM")}
+        nb = sorted(((n, v) for n, v in self._nb(goal, goal_index).items()
+                     if n in allowed), key=lambda t: -t[1])
+        out = {"nb": [n for n, _ in nb[:k]]}
+        gs = set(goal.stmt_syms)
+        sims = []
+        for d in self.decls[:goal_index]:
+            if d.kind != "THM":
+                continue
+            inter = sum(self._w(x) for x in gs & d.stmt_syms)
+            if inter:
+                union = sum(self._w(x) for x in gs | d.stmt_syms)
+                sims.append((inter / union, d))
+        sims.sort(key=lambda t: -t[0])
+        knn = []
+        for _, d in sims[:nn]:
+            for p in [d.name] + sorted(d.proof_deps):
+                if p in allowed and p not in knn:
+                    knn.append(p)
+        out["knn"] = knn[:2 * k]
+        sym = sorted(((d.name, self._overlap(gs, d)) for d in self.decls[:goal_index]
+                      if d.name in allowed), key=lambda t: -t[1])
+        out["sym"] = [n for n, v in sym[:k] if v > 0]
+        return out
+
 def evaluate_recall(decls, ks=(8, 16, 32, 64)):
     """How often does Search surface the facts a real proof used?
     For every theorem with at least one cited fact, measure the fraction of

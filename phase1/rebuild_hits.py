@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from library import load
 from itp import load_statements
-from prover import Prover, candidate_tactics
+from prover import Prover, candidate_tactics, apply_tactics
 from prover import followup_tactics as new_candidates
 
 CORPUS = "../data/corpus.sexpr"
@@ -29,12 +29,15 @@ def main():
         g = by[r["goal"]]
         gd = prover.goal_defs(g)
         t0 = time.time()
-        first, second = [], []
+        first, second, third = [], [], []
         for j, ps in enumerate(r["premise_sets"], start=1):
             first += [(f"{l}#{j}", s) for l, s in candidate_tactics(ps, r["defs"], gd)]
             second += [(f"{l}#{j}", s) for l, s in new_candidates(ps, r["defs"], gd)]
+            third += [(f"{l}#{j}", s) for l, s in apply_tactics(ps, r["defs"])]
         win, script = None, None
-        for batch in (first, second):
+        for batch in (first, second, third):
+            if not batch:
+                continue
             res = prover.attempt_batch(g, batch, timeout=300, single_timeout=90,
                                        max_retry_secs=600)
             win = next((l for l, ok, _ in res if ok), None)

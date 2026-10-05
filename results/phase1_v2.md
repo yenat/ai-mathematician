@@ -196,9 +196,120 @@ Unproved: 436; Vampire found a proof for 115 of them. Time per goal:
 proved median 42 s (90% within 157 s), failures median 190 s; the larger
 Vampire budget is the cost.
 
+## Follow-ups on top of v3 (2026-09-28/29), all re-verified
+
+| Lever | New proofs | Files |
+|---|---|---|
+| Vampire 256-fact slice (30 s) | 11 | `vampire256_*.jsonl`, `rebuild256.jsonl` |
+| Vampire 512-fact slice (30 s) | 7 | `vampire512.jsonl`, `rebuild512.jsonl` |
+| Apply-then-grind (`apply_tactics`) | 10 | `try_apply.jsonl` |
+| Vampire 4/8-fact slices | 3 | `vampire_small.jsonl`, `rebuild_small.jsonl` |
+| **Duper reconstruction** (`duper_tactics`) | **51** | `try_duper.jsonl` |
+
+Cumulative: **645 / 999 (64.6%) without LLM**, 650 with the LLM proofs; the
+list of the 82 goals added to v3 is `followup_v3_new.json`. Tried without
+gain: diverse small slices (Search.diverse_slices), all facts with
+Vampire's own SInE filter (4/71 oracle goals), Duper from Search facts on
+goals without a Vampire proof (0/30), a second Duper pass with all premise
+sets and expensive higher-order rules (0/8, stopped), and the direct LLM
+mode on the reconstruction residue (1/32, 96 calls).
+
+**Duper.** Duper (leanprover-community/duper, v4.34.0; built in
+`tools/duper-env`, not committed) is a superposition prover written in
+Lean that produces Lean proof terms: the counterpart of Isabelle's Metis
+in Sledgehammer. Given the facts Vampire used, it rebuilt 51 of the 109
+goals where Vampire had a proof but every Lean strategy failed, largely
+the higher-order cases (`grind` cannot instantiate predicate variables).
+In the pipeline it is the last reconstruction line, each attempt in its
+own Lean process with a 300 s limit (in one batch, a slow failing attempt
+starved the successful one).
+
+## v4 clean full run (launched 2026-09-29 13:36)
+
+All of the above built in: slices 16-512, `followup_tactics`,
+`apply_tactics`, Duper. Results: `phase1_full_v4.jsonl` (pending).
+
+## v4 (2026-10-03/05): Duper as a fourth proof line
+
+Three changes on top of v3: **Duper** (a proof-producing superposition prover
+that runs natively inside Lean) as a fourth line in `prove()`, premise slices
+extended to 256 and 512 facts, and `apply_tactics` as a third line.
+
+**Result: 640 / 999 (64.1%), no LLM**, single run
+(`phase1_full_v4.jsonl`, 4 workers, 79 core-hours). All 640 re-verified in
+fresh Lean runs (`recheck_v4.jsonl`: **640 / 640**). Against v3: 82 gained,
+5 lost to run-to-run variation.
+
+| line | v4 | v3 | change |
+|---|---:|---:|---:|
+| `duper` | 44 | 0 | **+44** |
+| `prem-grind` | 302 | 287 | +15 |
+| `prem-unfold-grind` | 133 | 122 | +11 |
+| `apply` | 7 | 0 | +7 |
+| `solve_by_elim` | 40 | 37 | +3 |
+| `induction` | 14 | 15 | -1 |
+| `goal-unfold` | 4 | 7 | -3 |
+
+Duper alone accounts for well over half the gain, and it is a classical
+symbolic prover with no learning in it. Unproved: 359, of which Vampire
+found a proof for 59. Time per goal: proved median 60 s (90% within 266 s),
+failures median 265 s.
+
+Note this 640 supersedes the earlier 645 figure quoted for v3-plus-follow-ups.
+That number was cumulative over several separate passes; 640 is one run.
+
+## Why the remaining 359 fail (2026-10-05)
+
+Four measurements, all from this corpus, that together explain the ceiling.
+
+**1. Premise *recall* is not the problem.** Compared against the premises
+Megalodon's own proof of each goal cites, Search's top-512 contains 100% of
+them even on goals that fail (top-128: 92%). v4 already slices to 512, so the
+needed facts are being supplied.
+
+**2. Premise *precision* is.** Give Vampire exactly the premises the original
+proof used -- typically about 8 facts, no distractors -- and it solves 32% of
+a sample of goals it had previously failed (8/25). Same facts, no noise.
+
+**3. Prefix slicing cannot escape this.** On goals that fail, the deepest
+needed fact sits at median rank 116 (75th percentile 198, 90th 396), and the
+proof needs a median of 8 of them. Only 8% have all their premises inside the
+top-16. So a slice small enough to be clean omits a premise, and a slice deep
+enough to be complete buries Vampire in ~120 distractors. On goals that
+succeed, the deepest needed fact is at rank 5 and the proof needs 2 facts.
+
+**4. The real split is structural.** Taking each goal's original proof term
+and counting its `have` steps (beta-redexes of the form
+`PPFAP (PLAM p ...) ...`, i.e. "assume p, justified by ..."):
+
+| | have-steps in the human proof | >= 1 step |
+|---|---|---|
+| goals v4 **proves** | median 0 | 5% |
+| goals v4 **fails** | median 1, mean 4.0 | 64% |
+
+The system solves the theorems whose human proof is a single leap, and fails
+on the ones proved in steps. It has no mechanism for an intermediate lemma,
+so it fails on exactly the goals that need one.
+
+And the hops are easy: across 1592 hops from 161 decomposable failed goals,
+one hop cites a median of **1** fact (82% cite at most 2) against a median of
+**12** for the whole goal -- putting each hop squarely in the range the system
+already proves at close to 100%.
+
+Every lever so far (better Search, bigger slices, Duper, the LLM) has
+optimised the single leap. None has removed the need for one.
+
 ## Next
 
-1. The 115 goals with a Vampire proof Lean cannot rebuild: replay
-   Vampire's higher-order instantiations.
-2. Richer induction (generalising the goal, strengthening the predicate).
-3. LLM: few-shot examples, finer outlines, per-gap feedback.
+1. **A `have`-chain prover.** Obtain intermediate lemma statements, prove each
+   hop with the existing stack, chain to the conclusion. Two sources, in
+   order: Megalodon's own proof term as an oracle (costs no API budget, and
+   establishes the ceiling), then an LLM proposing the lemmas. The second is
+   the right job for an LLM -- `dsp.py` failed at 1/32 because it asked for
+   rigour, which the kernel judges, rather than structure, which it does not.
+2. The 59 goals with a Vampire proof that even Duper cannot rebuild. Vampire's
+   TPTP output carries the full derivation (numbered formulas with
+   `inference(rule,[],[parents])` links) and the pipeline currently discards
+   all of it, keeping only the axiom names. Replaying it as a `have` chain is
+   the same idea as (1) from a different source.
+3. Richer induction (generalising the goal, strengthening the predicate).

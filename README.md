@@ -23,11 +23,30 @@ translated to Lean 4 by the companion
 | v1 full run, no LLM | 418 / 999 | 41.8% |
 | v1 + LLM feedback loop on reconstruction failures | 469 / 999 | 46.9% |
 | v2 full run, no LLM (learned Search, distilled strategies, all Vampire proofs, automatic induction) | 514 / 999 | 51.5% |
-| **v3 full run, no LLM** (+ Vampire 30 s with a 128-fact slice, second-line Lean strategies) | **563 / 999** | **56.4%** |
-| **v3 + the v1 LLM proofs** | **584 / 999** | **58.5%** |
+| v3 full run, no LLM (+ Vampire 30 s with a 128-fact slice, second-line Lean strategies) | 563 / 999 | 56.4% |
+| v3 + the v1 LLM proofs | 584 / 999 | 58.5% |
+| **v4 full run, no LLM** (+ Duper as a fourth proof line, 256/512-fact slices, `apply` strategies) | **640 / 999** | **64.1%** |
 
-Every one kernel-checked; all 563 v3 proofs and the 51 LLM-found proofs were
-also re-verified independently in fresh Lean runs. Details: `results/phase1_baseline_v1.md` (baseline, failure
+Every one kernel-checked; **all 640 v4 proofs were re-verified independently
+in fresh Lean runs (`recheck_v4.jsonl`: 640 / 640)**, as were the 563 v3
+proofs and the 51 LLM-found proofs.
+
+Where v4's +77 came from, by proof line (v4 vs v3):
+
+| line | v4 | v3 | change |
+|---|---:|---:|---:|
+| `duper` (Lean-native superposition) | 44 | 0 | **+44** |
+| `prem-grind` | 302 | 287 | +15 |
+| `prem-unfold-grind` | 133 | 122 | +11 |
+| `apply` | 7 | 0 | +7 |
+| `solve_by_elim` | 40 | 37 | +3 |
+| others | — | — | −3 net |
+
+The single largest gain is Duper, a classical symbolic prover with no
+machine learning in it. Across the five pipeline stages the LLM contributed
+least: the informal→formal pass (`dsp.py`) returned 1 / 32 on the hardest
+residual goals, and a zero-cost recheck at 1M heartbeats confirmed those
+were not timeouts. The run cost 79 core-hours. Details: `results/phase1_baseline_v1.md` (baseline, failure
 analysis), `results/phase1_llm_v1.md` (model comparison, cascade) 
 `results/phase1_v2.md` (v2 and v3 runs), `results/phase1_llm_dsp.md` (LLM
 informal→formal pass). Phase 1 report: `report/Phase1_Report_DRAFT.docx`.
@@ -102,6 +121,18 @@ cd ..
 ```
 
 Set `LEAN_BIN` if `lean` isn't at the default path in `phase1/itp.py`.
+
+```bash
+# 4. Optional: Duper (Lean-native superposition prover used to rebuild
+#    Vampire proofs that grind cannot; the prover uses it when present)
+mkdir -p tools/duper-env && cd tools/duper-env
+echo 'leanprover/lean4:v4.34.0' > lean-toolchain
+printf 'name = "duperenv"\n\n[[require]]\nname = "Duper"\ngit = "https://github.com/leanprover-community/duper.git"\nrev = "v4.34.0"\n' > lakefile.toml
+lake update && lake build Duper
+# lean-auto downloads the zipperposition binary with curl during the build;
+# without curl, place zipperposition.exe in .lake/packages/auto/.lake/build/
+cd ../..
+```
 
 For the LLM plug-in only: create `.env` in the repo root (git-ignored)
 with `LLM_API_KEY=...` and `LLM_BASE_URL=...` (an OpenAI-compatible

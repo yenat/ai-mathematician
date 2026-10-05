@@ -18,3 +18,4 @@ __pycache__/
 # never commit credentials
 .env
 *_api_key*
+tools/duper-env/

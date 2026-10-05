@@ -23,6 +23,13 @@ from itp import LEAN, LIB, BRIDGE, _GUARD, leak_free
 from search import Search
 from induction import Inductor, lean_script
 
+# Duper (Lean-native superposition prover, like Isabelle's Metis), built in
+# tools/duper-env for Lean v4.34.0; appended to LEAN_PATH when requested.
+_DUPER_PKGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                           "tools", "duper-env", ".lake", "packages")
+DUPER_PATH = "".join(":" + os.path.join(_DUPER_PKGS, p, ".lake", "build", "lib", "lean")
+                     for p in ("Duper", "auto", "batteries"))
+
 
 def _lean_name(name):
     """Megalodon names are valid Lean identifiers except primes-only
@@ -126,6 +133,37 @@ def followup_tactics(premises, defs, goal_defs):
     return c
 
 
+def apply_tactics(premises, defs):
+    """Third line: backward-chain one step with each premise, then grind the
+    subgoals. `apply` lets Lean's unifier pick the premise's arguments from
+    the goal, which grind cannot do for higher-order or impredicative
+    premises, e.g. ReplE_impred (forall p : Prop, (... -> p) -> p): apply
+    sets p := goal. The premises are first introduced as hypotheses and
+    bridged to native logic, so they unify with the bridged goal."""
+    P = [f"«{p}»" for p in premises]
+    haves = "".join(f"have hp{i} := @{p}\n" for i, p in enumerate(P))
+    unfold = ", ".join([BRIDGE] + [f"«{d}»" for d in defs])
+    finish = "all_goals ((try intros); (try simp only [{u}] at *); grind)"
+    out = []
+    for i in range(len(P)):
+        for tag, u in (("", BRIDGE), ("-unfold", unfold)):
+            out.append((f"apply{tag}-{i}",
+                        f"intros\n{haves}(try simp only [{BRIDGE}] at *)\n"
+                        f"apply hp{i}\n" + finish.format(u=u)))
+    return out
+
+def duper_tactics(premises, defs):
+    """Reconstruction with Duper (tools/duper-env), a proof-producing
+    superposition prover inside Lean: the Sledgehammer recipe of re-proving
+    with Metis from the facts the external ATP used. Unlike grind it does
+    higher-order unification, the gap left by the other strategies. Needs
+    attempt_batch(..., duper=True)."""
+    P = [f"«{p}»" for p in premises]
+    haves = "".join(f"have hp{i} := @{p}\n" for i, p in enumerate(P))
+    unfold = ", ".join([BRIDGE] + [f"«{d}»" for d in defs])
+    return [("duper", f"intros\n{haves}(try simp only [{BRIDGE}] at *)\nduper [*]"),
+            ("duper-unfold", f"intros\n{haves}(try simp only [{unfold}] at *)\nduper [*]")]
+
 class Prover:
     def __init__(self, decls, corpus_path, statements):
         self.decls = decls
@@ -136,8 +174,9 @@ class Prover:
         attach_prim_indices(self.thf, corpus_path)
         self.sigs = statements
         self.inductor = Inductor(decls)
+        self.use_duper = os.path.exists(DUPER_PATH.split(":")[1])
 
-    def premise_sets(self, goal, slices=(16, 32, 64, 128), vampire_timeout=30):
+    def premise_sets(self, goal, slices=(16, 32, 64, 128, 256, 512), vampire_timeout=30):
         """Return (premise_sets, defs, vampire_status).
 
         Runs Vampire on several premise-slice sizes: the failure diagnosis
@@ -146,6 +185,8 @@ class Prover:
         Every slice is tried; each proof found contributes the set of facts
         it used. Without any proof, the one set is Search's top facts.
 
+        v4: 256- and 512-fact slices added (15 and 7 further Vampire proofs
+        on the goals v3 left without one; vampire256_*/vampire512.jsonl).
         v3 budget: 30 s per slice and a 128-fact slice. v2 used 5 s and
         16/32/64; on the 395 goals v2 found no Vampire proof for, this
         budget found 66 (vampire30_*.jsonl), most at 128 facts."""
@@ -210,11 +251,11 @@ class Prover:
         return None
 
     def attempt_batch(self, goal, cands, timeout=120, single_timeout=60,
-                      max_retry_secs=480, heartbeats=200000):
+                      max_retry_secs=480, heartbeats=200000, duper=False):
         """Check every candidate for one goal in a single Lean process.
         Returns list of (label, ok, reason)."""
         sig = self.sigs[goal.name]
-        parts = ["import Lean", "import Bridge",
+        parts = ["import Lean", "import Bridge"] + (["import Duper"] if duper else []) + [
                  "set_option Elab.async false",
                  "set_option maxRecDepth 8000",
                  f"set_option maxHeartbeats {heartbeats}",
@@ -237,7 +278,7 @@ class Prover:
         try:
             r = subprocess.run([LEAN, path], capture_output=True, text=True,
                                timeout=timeout,
-                               env={**os.environ, "LEAN_PATH": LIB})
+                               env={**os.environ, "LEAN_PATH": LIB + (DUPER_PATH if duper else "")})
             out = r.stdout + r.stderr
         except subprocess.TimeoutExpired:
             os.unlink(path)
@@ -257,7 +298,7 @@ class Prover:
                                 for c2 in cands[len(results):]]
                     break
                 r1 = self.attempt_batch(goal, [c], timeout=single_timeout,
-                                        heartbeats=heartbeats)
+                                        heartbeats=heartbeats, duper=duper)
                 results += r1
                 if r1[0][1]:
                     results += [(c2[0], False, "skipped: already proved")
@@ -415,6 +456,34 @@ class Prover:
             results += self.attempt_batch(goal, second, timeout=300,
                                           single_timeout=90, max_retry_secs=600)
             winner = next((lbl for lbl, ok, _ in results if ok), None)
+        if not winner and vstatus.startswith("Theorem"):
+            # third line: one backward step with each premise, then grind
+            # (apply_tactics; 10 of the 115 v3 reconstruction failures)
+            third = [(f"{lbl}#{j}", s) for j, ps in enumerate(sets, start=1)
+                     for lbl, s in apply_tactics(ps, defs)]
+            if third:
+                results += self.attempt_batch(goal, third, timeout=300,
+                                              single_timeout=60, max_retry_secs=600)
+                winner = next((lbl for lbl, ok, _ in results if ok), None)
+        if not winner and vstatus.startswith("Theorem") and self.use_duper:
+            # last line: Duper (Metis-style reconstruction; 51 of the 109
+            # goals every other line failed on, try_duper.jsonl)
+            # each attempt in its own Lean process with its own time limit:
+            # batched, a slow failing variant used up the time of the one
+            # that would have succeeded (SepI: 106 s alone, lost in a batch)
+            fourth = [(f"{lbl}#{j}", s) for j, ps in enumerate(sets[:2], start=1)
+                      for lbl, s in duper_tactics(ps, defs)]
+            t_duper = time.time()
+            for cand in fourth:
+                if time.time() - t_duper > 900:
+                    results.append((cand[0], False, "skipped: duper time cap"))
+                    continue
+                results += self.attempt_batch(goal, [cand], timeout=300,
+                                              single_timeout=300, max_retry_secs=0,
+                                              heartbeats=1000000, duper=True)
+                if results[-1][1]:
+                    winner = results[-1][0]
+                    break
         out = {"goal": goal.name, "index": goal.index, "vampire": vstatus,
                "premises": premises, "premise_sets": sets, "defs": defs,
                "results": results, "proved_by": winner}
