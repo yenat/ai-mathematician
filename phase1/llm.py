@@ -9,6 +9,10 @@ What the model sees (and nothing else):
   * the facts Search/Vampire selected -- all strictly BEFORE the goal,
     statements only
   * the bridge lemmas to native logic
+  * optionally, Vampire's refutation proof of the goal from those same
+    facts (vampire_proof.proof_for_llm), as a guide to translate
+  * optionally, accepted proofs of similar theorems EARLIER in the library
+    (few-shot examples of its conventions)
   * on later rounds, its own previous attempt and Lean's error
 It never sees the goal's original proof or anything after the goal.
 
@@ -100,11 +104,11 @@ def usage_summary(path=LEDGER):
 
 
 def chat(messages, model=DEFAULT_MODEL, max_tokens=16000, temperature=0.2,
-         retries=3):
+         retries=4, salvage=True, extra=None):
     env = _env()
     body = json.dumps({"model": model, "messages": messages,
                        "max_tokens": max_tokens,
-                       "temperature": temperature}).encode()
+                       "temperature": temperature, **(extra or {})}).encode()
     for attempt in range(retries):
         req = urllib.request.Request(
             env["LLM_BASE_URL"].rstrip("/") + "/chat/completions", data=body,
@@ -113,13 +117,35 @@ def chat(messages, model=DEFAULT_MODEL, max_tokens=16000, temperature=0.2,
         n = _reserve(model)
         t0 = time.time()
         try:
-            r = json.load(urllib.request.urlopen(req, timeout=180))
+            # under load the gateway can take minutes on long prompts;
+            # 180 s lost whole goals to timeouts in the parallel sweeps
+            r = json.load(urllib.request.urlopen(req, timeout=600))
             _log_usage(n, model, r.get("usage") or {}, time.time() - t0)
-            return r["choices"][0]["message"].get("content") or ""
+            ch = r["choices"][0]
+            content = ch["message"].get("content") or ""
+            notes = ch["message"].get("reasoning") or ""
+            if not content.strip() and ch.get("finish_reason") == "length" \
+                    and notes and salvage:
+                # The gateway caps a reply at 8192 tokens, and on long
+                # prompts the model spends all of them thinking: 73% of
+                # replies in the first Vampire-proof A/B came back empty.
+                # Hand it the end of its own notes and ask for the answer.
+                return chat(messages + [{"role": "user", "content":
+                    "You ran out of space while thinking. Your notes so far "
+                    "(the end of them):\n\n" + notes[-12000:] + "\n\nNow reply "
+                    "with ONLY the final ```lean block (tactic script only). "
+                    "Think briefly; do not start over."}],
+                    model=model, max_tokens=max_tokens,
+                    temperature=temperature, retries=retries, salvage=False,
+                    # thinking off: the notes already hold it (deepseek
+                    # honours "none"; gpt-oss rejects it, "low" is its least)
+                    extra={"reasoning_effort":
+                           "none" if "deepseek" in model else "low"})
+            return content
         except (urllib.error.URLError, TimeoutError, KeyError) as e:
             if attempt == retries - 1:
                 raise
-            time.sleep(2 * (attempt + 1))
+            time.sleep(20 * (attempt + 1))
     return ""
 
 
@@ -215,8 +241,17 @@ def _extract(reply):
     return "\n".join(lines).strip()
 
 
-def build_prompt(ctx, goal_name, goal_sig, defs, premises, state=None):
+def build_prompt(ctx, goal_name, goal_sig, defs, premises, state=None,
+                 atp_proof=None, examples=None):
     return (
+        ("Accepted Lean proofs of similar EARLIER theorems in this library "
+         "(to show its conventions; do not cite these theorems unless they "
+         "are listed as available facts):\n\n"
+         + "\n\n".join(f"theorem {n}{sig} := by\n"
+                         + "\n".join("  " + l for l in sc.splitlines())
+                         for n, sig, sc in examples) + "\n\n---\n\n"
+         if examples else "")
+        + (
         f"Prove this theorem (the statement is fixed; write only the tactic script):\n\n"
         f"theorem {goal_name}{goal_sig} := by\n  ...\n\n"
         + (f"Lean's goal state after `intros` and converting encoded logic to native "
@@ -224,7 +259,10 @@ def build_prompt(ctx, goal_name, goal_sig, defs, premises, state=None):
         + f"Definitions it uses:\n{ctx.show(defs) or '(none)'}\n\n"
         f"Available facts (you may use these, by name):\n"
         f"{ctx.show(premises) or '(none)'}\n"
-    )
+        + (f"\nThe automated prover Vampire PROVED this goal from exactly the "
+           f"facts and definitions above. Its proof (TPTP, names mapped back "
+           f"to the library):\n\n{atp_proof}\n" if atp_proof else "")
+    ))
 
 
 def goal_state(prover, goal):
@@ -238,8 +276,64 @@ def goal_state(prover, goal):
     return m.group(1).strip()[:3000] if m else None
 
 
+def _bridged(lines, BRIDGE):
+    """The bridge inserted before the final top-level tactic: the usual
+    near-miss where the argument is right but the last step works on
+    encoded `eq`/`and`/... (`simpa [h2] using h1` with h2 : eq set a b)."""
+    tops = [j for j, l in enumerate(lines)
+            if l.strip() and not l.startswith((" ", "\t", "--"))]
+    if not tops or tops[-1] == 0:
+        return None
+    i = tops[-1]
+    return lines[:i] + [f"simp only [{BRIDGE}] at *"] + lines[i:]
+
+
+def _dedented(lines):
+    """First line at column 0, everything after it indented: the model
+    indented the body as if under a header, which ends the `by` block
+    after line one (`unexpected token 'have'; expected command`)."""
+    body = [l for l in lines[1:] if l.strip()]
+    if not body or lines[0].startswith((" ", "\t")) \
+            or lines[0].rstrip().endswith(("by", ":=", "=>", "·")):
+        return None
+    m = min(len(l) - len(l.lstrip()) for l in body)
+    if m == 0:
+        return None
+    return [lines[0]] + [l[m:] if l.strip() else l for l in lines[1:]]
+
+
+def repair_variants(script, why, premises, label):
+    """Mechanical repairs of a rejected script, as (label, script) pairs:
+    bridge before the last step; dedent; and, when Lean reports unsolved
+    goals (the commonest failure -- the model follows the argument but
+    stops short), finish every leftover goal with the deterministic
+    closers the pipeline already uses."""
+    from itp import BRIDGE
+    from prover import _lean_name
+    lines = script.rstrip().splitlines()
+    if not lines:
+        return []
+    bases = [("", lines)]
+    for tag, fn in (("-bridge", lambda l: _bridged(l, BRIDGE)),
+                    ("-dedent", _dedented)):
+        v = fn(lines)
+        if v:
+            bases.append((tag, v))
+    d = _dedented(lines)
+    if d and _bridged(d, BRIDGE):
+        bases.append(("-dedent-bridge", _bridged(d, BRIDGE)))
+    P = ", ".join(_lean_name(p) for p in premises)
+    sbe = f"solve_by_elim (maxDepth := 8) [{P}]" if P else "solve_by_elim (maxDepth := 8)"
+    closer = [f"all_goals (try simp only [{BRIDGE}] at *)",
+              f"all_goals (first | grind | {sbe} | (intros; grind) | assumption)"]
+    out = [(label + tag, "\n".join(ls)) for tag, ls in bases[1:]]
+    if "unsolved goals" in why or "-dedent" in "".join(t for t, _ in bases):
+        out += [(label + tag + "-finish", "\n".join(ls + closer)) for tag, ls in bases]
+    return out
+
+
 def llm_rounds(prover, goal, premises, defs, rounds=3, model=DEFAULT_MODEL,
-               log=None):
+               log=None, atp_proof=None, examples=None):
     """Feedback loop: propose, check, feed the Lean error back. Returns
     (proved_label or None, transcript list)."""
     ctx = getattr(prover, "_lean_ctx", None) or LeanContext()
@@ -248,7 +342,8 @@ def llm_rounds(prover, goal, premises, defs, rounds=3, model=DEFAULT_MODEL,
     state = goal_state(prover, goal)
     msgs = [{"role": "system", "content": SYSTEM},
             {"role": "user", "content": build_prompt(ctx, goal.name, sig, defs,
-                                                     premises, state)}]
+                                                     premises, state,
+                                                     atp_proof, examples)}]
     transcript = []
     for r in range(1, rounds + 1):
         try:
@@ -271,6 +366,17 @@ def llm_rounds(prover, goal, premises, defs, rounds=3, model=DEFAULT_MODEL,
                 if t_ok:
                     ok, why, script = True, t_why, t_script
                     break
+        if not ok:
+            # near-misses, repaired without an LLM call; every repaired
+            # script still goes through the full check. The model is shown
+            # its own script's error, not a repair's.
+            variants = repair_variants(script, why, premises, label)
+            if variants:
+                for (lbl, r_ok, r_why), (_, r_script) in zip(
+                        prover.attempt_batch(goal, variants), variants):
+                    if r_ok:
+                        ok, why, script, label = True, r_why, r_script, lbl
+                        break
         transcript.append({"round": r, "script": script, "ok": ok, "why": why})
         if log:
             head = " | ".join(script.splitlines()[:4])

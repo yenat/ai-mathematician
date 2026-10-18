@@ -19,3 +19,10 @@ __pycache__/
 .env
 *_api_key*
 tools/duper-env/
+
+# raw Megalodon export and third-party binaries (large; see README, "Setup")
+data/mglib/
+tools/zipperposition/
+
+# LLM spend ledgers (per-run bookkeeping)
+results/*ledger*.jsonl

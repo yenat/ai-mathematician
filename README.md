@@ -25,11 +25,16 @@ translated to Lean 4 by the companion
 | v2 full run, no LLM (learned Search, distilled strategies, all Vampire proofs, automatic induction) | 514 / 999 | 51.5% |
 | v3 full run, no LLM (+ Vampire 30 s with a 128-fact slice, second-line Lean strategies) | 563 / 999 | 56.4% |
 | v3 + the v1 LLM proofs | 584 / 999 | 58.5% |
-| **v4 full run, no LLM** (+ Duper as a fourth proof line, 256/512-fact slices, `apply` strategies) | **640 / 999** | **64.1%** |
+| v4 full run, no LLM (+ Duper as a fourth proof line, 256/512-fact slices, `apply` strategies) | 640 / 999 | 64.1% |
+| **v5: v4 + the fixed LLM loop + earlier experiments** (see below) | **742 / 999** | **74.3%** |
 
 Every one kernel-checked; **all 640 v4 proofs were re-verified independently
 in fresh Lean runs (`recheck_v4.jsonl`: 640 / 640)**, as were the 563 v3
-proofs and the 51 LLM-found proofs.
+proofs and the 51 LLM-found proofs. Of v5's 102 beyond v4, the 77 LLM
+proofs were re-verified from scratch (`results/llm_proofs_verified.json`:
+77 / 77); the other 25 come from earlier experiments (automatic induction,
+theorems earlier versions proved), verified when found
+(`results/phase1_v5_summary.json` lists all of them).
 
 Where v4's +77 came from, by proof line (v4 vs v3):
 
@@ -42,12 +47,38 @@ Where v4's +77 came from, by proof line (v4 vs v3):
 | `solve_by_elim` | 40 | 37 | +3 |
 | others | — | — | −3 net |
 
-The single largest gain is Duper, a classical symbolic prover with no
-machine learning in it. Across the five pipeline stages the LLM contributed
-least: the informal→formal pass (`dsp.py`) returned 1 / 32 on the hardest
-residual goals, and a zero-cost recheck at 1M heartbeats confirmed those
-were not timeouts. The run cost 79 core-hours. Details: `results/phase1_baseline_v1.md` (baseline, failure
-analysis), `results/phase1_llm_v1.md` (model comparison, cascade) 
+The single largest gain in v4 is Duper, a classical symbolic prover with no
+machine learning in it. The run cost 79 core-hours.
+
+### v5: the LLM loop, fixed
+
+Up to v4 the LLM contributed least of the five stages. Testing whether it
+does better when shown Vampire's whole proof, not just the facts it used,
+exposed why: **about 73% of LLM replies were empty**. The gateway caps a
+reply at 8,192 tokens and the model spent them all thinking. Many of the
+remaining scripts had the right argument but failed on indentation, or
+stopped one step short. Under load, a 180 s timeout also discarded whole
+goals. Fixes, all in `phase1/llm.py`:
+
+- **Rescue:** a reply that runs out while thinking is re-asked with its own
+  notes and thinking switched off.
+- **Free repairs** (no LLM call, every result still fully checked): fix
+  indentation, insert the bridge before the last step, and close leftover
+  goals with the pipeline's own `grind` / `solve_by_elim`.
+- 5 rounds instead of 3, a 600 s timeout, and few-shot examples: accepted
+  proofs of similar *earlier* theorems only.
+
+With the fixes the LLM found 77 proofs, all re-verified. They include 47 of
+the 59 goals Vampire proves but Lean could not rebuild. In the final sweep
+over every goal still unproved, deepseek-v4-flash proved 27 and gpt-oss-120b
+8. Once the empty replies were fixed, showing the LLM Vampire's proof made
+no measurable difference (34 / 51 with it, 34 / 51 without, same facts).
+
+The informal→formal pass (`experiments/dsp.py`) returned 1 / 32 on the
+hardest residual goals before these fixes; it has not been re-run since.
+
+Details: `results/phase1_baseline_v1.md` (baseline, failure
+analysis), `results/phase1_llm_v1.md` (model comparison, cascade),
 `results/phase1_v2.md` (v2 and v3 runs), `results/phase1_llm_dsp.md` (LLM
 informal→formal pass). Phase 1 report: `report/Phase1_Report_DRAFT.docx`.
 
@@ -94,9 +125,15 @@ goal ──> Search ──> ranked facts ──> Vampire (untrusted) ──> pre
 - `phase1/itp.py`, `phase1/prover.py`: build Lean proof attempts, check
   them, apply the statement check and leak guard.
 - `phase1/llm.py`: LLM proposes a Lean tactic script, sees Lean's
-  error on failure, retries (the feedback loop from the design sketch).
-  `llm_experiment.py` runs it over a results file; `recheck.py`
-  independently re-verifies every LLM-found proof.
+  error on failure, retries (the feedback loop from the design sketch),
+  with the rescue and free repairs described above.
+  `experiments/try_llm_vampire_sweep.py` runs it over many goals;
+  `recheck.py` and `experiments/verify_vp_final.py` independently
+  re-verify every LLM-found proof.
+- `phase1/vampire_proof.py`: parses Vampire's refutation and rewrites it
+  for an LLM prompt (library names, bookkeeping steps collapsed).
+- `phase1/experiments/`: one-off experiment drivers, kept so every number
+  here can be reproduced (see its README).
 
 ## Setup
 
@@ -146,15 +183,24 @@ python3 test_guard.py                 # leak-guard controls: must all pass
 python3 search.py ../data/corpus.sexpr   # Search recall vs. real proofs
 python3 experiment.py 33 6 out.jsonl  # sample: every 33rd theorem, 6 workers
 python3 experiment.py 1 6 out.jsonl   # full benchmark (~7h on 6 workers)
-python3 try_llm.py <thm1,thm2> openai/gpt-oss-120b 4   # LLM loop, experimental
+PYTHONPATH=. python3 experiments/try_llm.py <thm1,thm2> openai/gpt-oss-120b 4   # LLM loop, experimental
+
+# the v5 LLM sweep over every goal no run has proved yet, then re-verification
+PYTHONPATH=. python3 experiments/try_llm_vampire_sweep.py prep-search ../results/rest.jsonl
+LLM_LEDGER=../results/rest_ledger.jsonl LLM_CALL_CAP=4000 PYTHONPATH=. \
+  python3 experiments/try_llm_vampire_sweep.py run ../results/rest.jsonl ../results/rest_out.jsonl noproof \
+  --rounds 5 --workers 3 --examples 3 --model deepseek/deepseek-v4-flash-0731
+PYTHONPATH=. python3 experiments/verify_vp_final.py ../results/verified.json ../results/rest_out.jsonl
 ```
 
 ## Known limits
 
 - The library uses Megalodon's own foundations inside Lean (no Mathlib),
   so Lean's automation only works well after the bridge rewrite.
-- In the v3 run, 115 unproved theorems have a Vampire proof that Lean did
-  not rebuild (mostly needing higher-order premise instances); 321 have
-  none. Borderline goals vary between runs because of Vampire's time limit
-  (8 v2 successes were not reproduced in v3).
+- 257 theorems remain unproved. Most need a long multi-step argument
+  (surreal-number arithmetic above all): the LLM fails there on the
+  argument itself, not on formatting. Borderline goals vary between runs
+  because of Vampire's time limit and LLM sampling.
+- On the LLM gateway, deepseek-v4-flash is the stronger model but is
+  heavily loaded (minutes per reply); gpt-oss-120b answers in seconds.
 - Category percentages use a vocabulary heuristic and are approximate.
