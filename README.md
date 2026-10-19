@@ -18,23 +18,26 @@ On the 999-theorem reference library (Megalodon's `100thms_12.mg`,
 translated to Lean 4 by the companion
 [megalodon-lean4](https://github.com/yenat/megalodon-lean4) translator):
 
-| | Proved | Rate |
-|---|---|---|
-| v1 full run, no LLM | 418 / 999 | 41.8% |
-| v1 + LLM feedback loop on reconstruction failures | 469 / 999 | 46.9% |
-| v2 full run, no LLM (learned Search, distilled strategies, all Vampire proofs, automatic induction) | 514 / 999 | 51.5% |
-| v3 full run, no LLM (+ Vampire 30 s with a 128-fact slice, second-line Lean strategies) | 563 / 999 | 56.4% |
-| v3 + the v1 LLM proofs | 584 / 999 | 58.5% |
-| v4 full run, no LLM (+ Duper as a fourth proof line, 256/512-fact slices, `apply` strategies) | 640 / 999 | 64.1% |
-| **v5: v4 + the fixed LLM loop + earlier experiments** (see below) | **742 / 999** | **74.3%** |
+| Version | What changed | Proved | Gain |
+|---|---|---|---|
+| v1 | Search + Vampire + Lean `grind` (no LLM) | 418 | baseline |
+| v2 | Learned Search, distilled tactics, automatic induction | 514 | +96 |
+| v3 | Vampire with a 128-fact slice, second-line Lean strategies | 563 | +49 |
+| v4 | Duper (Lean-native prover), 256/512-fact slices, `apply` strategies | 640 | +77 |
+| v4 + earlier experiments | Hybrid induction, 300 s Vampire, older versions' extras | 665 | +25 |
+| v5 | Testing the LLM with Vampire's whole proof exposed 73% empty LLM replies. Fixes: rescue cut-off replies, free repairs (indentation, `eq` bridge, finish leftover goals), 5 rounds, few-shot examples | 742 | +77 |
+| v6 | The model now gets real errors (49% of feedback had been bogus), closest real lemma names suggested for invented ones, every network error retried, deepseek only | 755 | +13 |
+| v7 | 96 facts instead of 24. The measurement showed only 7 of 257 goals had every needed lemma in the old 24 | **832** | +77 |
+| v8 (running) | 160 facts, 7 rounds | 842 so far | +10 (27 of 167 goals done) |
 
 Every one kernel-checked; **all 640 v4 proofs were re-verified independently
 in fresh Lean runs (`recheck_v4.jsonl`: 640 / 640)**, as were the 563 v3
-proofs and the 51 LLM-found proofs. Of v5's 102 beyond v4, the 77 LLM
-proofs were re-verified from scratch (`results/llm_proofs_verified.json`:
-77 / 77); the other 25 come from earlier experiments (automatic induction,
-theorems earlier versions proved), verified when found
-(`results/phase1_v5_summary.json` lists all of them).
+proofs and the 51 LLM-found proofs. The LLM proofs of v5 were re-verified
+from scratch (`results/llm_proofs_verified.json`: 77 / 77), as were those of
+v6 and v7 (`results/v6v7_verified.json`: 90 / 90). The 25 from earlier
+experiments (automatic induction, theorems earlier versions proved) were
+verified when found (`results/phase1_v5_summary.json` lists them). v8's
+proofs are re-verified the same way when its run ends.
 
 Where v4's +77 came from, by proof line (v4 vs v3):
 

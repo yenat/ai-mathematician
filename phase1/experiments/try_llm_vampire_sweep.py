@@ -16,6 +16,8 @@ statement identity, leak guard).
        run has proved yet (for the noproof arm, and as Vampire targets)
   run  [--examples N] adds N accepted proofs of similar earlier theorems
        [--skip-proved-in a.jsonl,b.jsonl] skips goals already proved there
+       [--mode dsp] plan-and-fill (experiments/dsp.py) instead of the loop
+       [--mode decompose] plan, then prove stuck steps as lemmas (decompose.py)
       LLM_LEDGER / LLM_CALL_CAP bound the spend, as in try_llm_sweep.py
 """
 import json
@@ -141,7 +143,7 @@ def examples_for(p, goal, n):
 
 def _run(args):
     from llm import llm_rounds, BudgetExhausted
-    row, arm, model, rounds, n_ex = args
+    row, arm, model, rounds, n_ex, mode = args
     name = row["goal"]
     if _stop.is_set():
         return {"goal": name, "arm": arm, "proved_by": None, "why": "budget exhausted"}
@@ -149,10 +151,23 @@ def _run(args):
     g = p.by_name[name]
     t0 = time.time()
     try:
-        label, tr = llm_rounds(p, g, row["facts"], row["defs"], rounds=rounds,
-                               model=model,
-                               atp_proof=row["proof"] if arm == "proof" else None,
-                               examples=examples_for(p, g, n_ex))
+        if mode == "decompose":
+            # plan, then prove each stuck step as its own lemma (decompose.py)
+            from decompose import decompose_rounds
+            label, tr = decompose_rounds(p, g, row["facts"], row["defs"],
+                                         repair_rounds=max(rounds - 1, 0), model=model,
+                                         examples=examples_for(p, g, n_ex))
+        elif mode == "dsp":
+            # plan with the LLM, fill each `sorry` step with the hammer
+            from dsp import dsp_rounds
+            label, tr = dsp_rounds(p, g, row["facts"], row["defs"],
+                                   repair_rounds=max(rounds - 1, 0), model=model,
+                                   examples=examples_for(p, g, n_ex))
+        else:
+            label, tr = llm_rounds(p, g, row["facts"], row["defs"], rounds=rounds,
+                                   model=model,
+                                   atp_proof=row["proof"] if arm == "proof" else None,
+                                   examples=examples_for(p, g, n_ex))
     except BudgetExhausted:
         _stop.set()
         return {"goal": name, "arm": arm, "proved_by": None, "why": "budget exhausted"}
@@ -163,7 +178,7 @@ def _run(args):
             "secs": round(time.time() - t0, 1), "transcript": tr}
 
 
-def run(cache, out, arm, model, rounds, workers, n_ex=0, only_failed=None):
+def run(cache, out, arm, model, rounds, workers, n_ex=0, only_failed=None, mode="loop"):
     rows = list({r["goal"]: r for r in map(json.loads, open(cache))}.values())
     # the proof arm needs a Vampire proof; the noproof arm runs on any row
     rows = [r for r in rows if r["proof"] or (arm != "proof" and r.get("facts") is not None)]
@@ -184,7 +199,7 @@ def run(cache, out, arm, model, rounds, workers, n_ex=0, only_failed=None):
     _init()
     n = won = 0
     with ThreadPoolExecutor(workers) as ex, open(out, "a") as fh:
-        for r in ex.map(_run, ((x, arm, model, rounds, n_ex) for x in rows)):
+        for r in ex.map(_run, ((x, arm, model, rounds, n_ex, mode) for x in rows)):
             n += 1
             won += bool(r["proved_by"])
             fh.write(json.dumps(r) + "\n")
@@ -208,4 +223,5 @@ if __name__ == "__main__":
     else:
         run(rest[0], rest[1], rest[2], opt("--model", "deepseek/deepseek-v4-flash-0731"),
             int(opt("--rounds", "3")), int(opt("--workers", "3")),
-            int(opt("--examples", "0")), opt("--skip-proved-in", None))
+            int(opt("--examples", "0")), opt("--skip-proved-in", None),
+            opt("--mode", "loop"))

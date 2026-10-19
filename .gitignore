@@ -26,3 +26,6 @@ tools/zipperposition/
 
 # LLM spend ledgers (per-run bookkeeping)
 results/*ledger*.jsonl
+
+# embedding caches (regenerable, large)
+results/emb_*.json

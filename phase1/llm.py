@@ -22,6 +22,7 @@ kernel + statement-identity check + leak guard (see itp.py).
 Credentials come from ../.env (LLM_API_KEY, LLM_BASE_URL); the key is never
 logged or written anywhere else.
 """
+import http.client
 import json
 import os
 import re
@@ -142,7 +143,11 @@ def chat(messages, model=DEFAULT_MODEL, max_tokens=16000, temperature=0.2,
                     extra={"reasoning_effort":
                            "none" if "deepseek" in model else "low"})
             return content
-        except (urllib.error.URLError, TimeoutError, KeyError) as e:
+        # Every network failure is retried, not only URLError: the gateway
+        # also drops connections (http.client.RemoteDisconnected), which
+        # cut 19 goals short in the v6 sweep before this was caught.
+        except (urllib.error.URLError, http.client.HTTPException, ConnectionError,
+                TimeoutError, OSError, KeyError, ValueError) as e:
             if attempt == retries - 1:
                 raise
             time.sleep(20 * (attempt + 1))
@@ -167,6 +172,10 @@ class LeanContext:
             self.text[name] = line
 
     def show(self, names, limit_chars=12000):
+        # Facts are shown up to limit_chars. Prompts pass a larger limit for
+        # the premises: on the 257 hardest goals the human proofs cite a
+        # median of 13 lemmas, and Search's top 24 held all of them for only
+        # 7 goals (top 96: 66).
         out, total = [], 0
         for n in names:
             t = self.text.get(n)
@@ -213,6 +222,8 @@ only refer to names you introduced.
 Rules:
 - Use ONLY the facts listed as available, plus the bridge lemmas and
   definitions shown. Do NOT use the theorem being proved.
+- Every top-level tactic starts at column 0 (no indentation); indent only
+  the body of a nested `by` block. Never use `sorry` or `admit`.
 - Reply with exactly one ```lean code block containing ONLY the tactic
   script (the lines after `:= by`), no `theorem` header.
 """
@@ -258,19 +269,20 @@ def build_prompt(ctx, goal_name, goal_sig, defs, premises, state=None,
            f"(`intros; simp only [b_*] at *`):\n{state}\n\n" if state else "")
         + f"Definitions it uses:\n{ctx.show(defs) or '(none)'}\n\n"
         f"Available facts (you may use these, by name):\n"
-        f"{ctx.show(premises) or '(none)'}\n"
+        f"{ctx.show(premises, limit_chars=80000) or '(none)'}\n"
         + (f"\nThe automated prover Vampire PROVED this goal from exactly the "
            f"facts and definitions above. Its proof (TPTP, names mapped back "
            f"to the library):\n\n{atp_proof}\n" if atp_proof else "")
     ))
 
 
-def goal_state(prover, goal):
+def goal_state(prover, goal, guard=None):
     """Ask Lean for the goal state after intros + bridging, by deliberately
     leaving it unsolved and reading the 'unsolved goals' error."""
     from itp import BRIDGE
     res = prover.attempt_batch(
-        goal, [("probe", f"intros\ntry simp only [{BRIDGE}] at *\ndone")])
+        goal, [("probe", f"intros\ntry simp only [{BRIDGE}] at *\ndone")],
+        guard=guard)
     why = res[0][2]
     m = re.search(r"unsolved goals\s*\n(.*)", why, re.S)
     return m.group(1).strip()[:3000] if m else None
@@ -332,14 +344,58 @@ def repair_variants(script, why, premises, label):
     return out
 
 
+_BRIDGE_SIMP = re.compile(r"^simp only \[\s*(b_\w+\s*,\s*)*b_\w+\s*\] at \*\s*$")
+
+
+def normalize(script):
+    """Mechanical fixes applied BEFORE Lean sees a script, so the error the
+    model gets back is about its argument, not about layout:
+    - first line at column 0 with the body indented (49% of failed attempts
+      in the v5 sweep showed the model a bogus `introN` error instead);
+    - a bridge-only `simp only [b_*] at *` with nothing to rewrite fails with
+      "simp made no progress" and kills the script (82 attempts): make it
+      `try`."""
+    lines = _dedented(script.splitlines()) or script.splitlines()
+    lines = ["try " + l if _BRIDGE_SIMP.match(l) else l for l in lines]
+    return "\n".join(lines)
+
+
+def feedback(why, prover, goal, limit=2500):
+    """Lean's error as the model should see it: without the guard's
+    internals, bounded in length (long errors push deepseek past the
+    gateway's 8192-token reply cap), and, for names that do not exist,
+    the closest real lemmas from EARLIER in the library with their
+    statements (all 469 unknown names in the v5 sweep were invented)."""
+    import difflib
+    body = "\n".join(l for l in why.splitlines() if not l.startswith("GUARD"))
+    body = body.strip()[:limit]
+    unknown = re.findall(r"[Uu]nknown (?:identifier|constant) `([^`]+)`", why)
+    if unknown:
+        ctx = getattr(prover, "_lean_ctx", None)
+        earlier = [d.name for d in prover.decls[:goal.index]
+                   if d.kind in ("THM", "AXIOM", "DEF")]
+        hints = []
+        for n in dict.fromkeys(u.replace("Megalodon.", "") for u in unknown):
+            near = difflib.get_close_matches(n, earlier, n=4, cutoff=0.5)
+            if near:
+                stmts = [ctx.text.get(m, m) if ctx else m for m in near]
+                hints.append(f"`{n}` does not exist. Closest real lemmas "
+                             f"(you may use them):\n" + "\n".join(stmts))
+            else:
+                hints.append(f"`{n}` does not exist; use only listed facts.")
+        body += "\n\n" + "\n\n".join(hints)[:2500]
+    return body
+
+
 def llm_rounds(prover, goal, premises, defs, rounds=3, model=DEFAULT_MODEL,
-               log=None, atp_proof=None, examples=None):
+               log=None, atp_proof=None, examples=None, guard=None):
     """Feedback loop: propose, check, feed the Lean error back. Returns
-    (proved_label or None, transcript list)."""
+    (proved_label or None, transcript list). `guard`: see attempt_batch
+    (a lifted lemma that is not a library declaration needs its own)."""
     ctx = getattr(prover, "_lean_ctx", None) or LeanContext()
     prover._lean_ctx = ctx
     sig = prover.sigs[goal.name]
-    state = goal_state(prover, goal)
+    state = goal_state(prover, goal, guard=guard)
     msgs = [{"role": "system", "content": SYSTEM},
             {"role": "user", "content": build_prompt(ctx, goal.name, sig, defs,
                                                      premises, state,
@@ -348,12 +404,28 @@ def llm_rounds(prover, goal, premises, defs, rounds=3, model=DEFAULT_MODEL,
     for r in range(1, rounds + 1):
         try:
             reply = chat(msgs, model=model)
-        except Exception as e:
-            transcript.append({"round": r, "error": f"api: {type(e).__name__}"})
-            break
+        except BudgetExhausted:
+            raise
+        except Exception:
+            # the gateway failed every retry: wait once, then give the round
+            # one more chance before abandoning the goal
+            time.sleep(120)
+            try:
+                reply = chat(msgs, model=model)
+            except BudgetExhausted:
+                raise
+            except Exception as e:
+                transcript.append({"round": r, "error": f"api: {type(e).__name__}"})
+                break
         script = _extract(reply)
+        # The commonest slip: first line at column 0, the rest indented, so
+        # Lean reads the next lines as `intro` arguments. Repairing it only
+        # at check time still showed the model the bogus error ("no
+        # additional binders ... simp : Prop"): 49% of failed attempts in
+        # the v5 sweep. Normalize first, so feedback is the real error.
+        script = normalize(script)
         label = f"llm-r{r}"
-        res = prover.attempt_batch(goal, [(label, script)])
+        res = prover.attempt_batch(goal, [(label, script)], guard=guard)
         _, ok, why = res[0]
         if not ok and "No goals to be solved" in why:
             # the proof was complete before the script ended: retry without
@@ -362,7 +434,7 @@ def llm_rounds(prover, goal, premises, defs, rounds=3, model=DEFAULT_MODEL,
             trims = [(f"{label}-trim{k}", "\n".join(lines[:-k]))
                      for k in (1, 2, 3) if len(lines) > k]
             for (lbl, t_ok, t_why), (_, t_script) in zip(
-                    prover.attempt_batch(goal, trims), trims):
+                    prover.attempt_batch(goal, trims, guard=guard), trims):
                 if t_ok:
                     ok, why, script = True, t_why, t_script
                     break
@@ -373,7 +445,7 @@ def llm_rounds(prover, goal, premises, defs, rounds=3, model=DEFAULT_MODEL,
             variants = repair_variants(script, why, premises, label)
             if variants:
                 for (lbl, r_ok, r_why), (_, r_script) in zip(
-                        prover.attempt_batch(goal, variants), variants):
+                        prover.attempt_batch(goal, variants, guard=guard), variants):
                     if r_ok:
                         ok, why, script, label = True, r_why, r_script, lbl
                         break
@@ -386,6 +458,6 @@ def llm_rounds(prover, goal, premises, defs, rounds=3, model=DEFAULT_MODEL,
             return label, transcript
         msgs += [{"role": "assistant", "content": f"```lean\n{script}\n```"},
                  {"role": "user", "content":
-                  f"Lean rejected that proof:\n{why}\n\n"
+                  f"Lean rejected that proof:\n{feedback(why, prover, goal)}\n\n"
                   f"Fix it. Reply with one ```lean block, tactic script only."}]
     return None, transcript

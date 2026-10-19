@@ -8,6 +8,7 @@ writes the ones that pass again. Only these are counted.
   python3 verify_vp_final.py <out.json> <result.jsonl> [<result.jsonl> ...]
 """
 import json
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
@@ -23,27 +24,33 @@ def scripts(path):
         if not r.get("proved_by"):
             continue
         if r.get("script"):
-            yield r["goal"], r["script"], path
+            yield r["goal"], r["script"], path, r.get("prelude", "")
             continue
         ok = [t for t in r.get("transcript") or [] if t.get("ok") and t.get("script")]
         if ok:
-            yield r["goal"], ok[-1]["script"], path
+            # decompose.py proofs cite lemmas proved alongside them (prelude)
+            yield r["goal"], ok[-1]["script"], path, ok[-1].get("prelude", "")
 
 
 def main():
     out, paths = sys.argv[1], sys.argv[2:]
     claims = {}
-    for path in paths:
-        for goal, script, src in scripts(path):
-            claims.setdefault(goal, []).append((script, src))
+    missing = [x for x in paths if not os.path.exists(x)]
+    if missing:
+        print("skipping missing:", " ".join(missing), flush=True)
+    for path in (x for x in paths if os.path.exists(x)):
+        for goal, script, src, prelude in scripts(path):
+            claims.setdefault(goal, []).append((script, src, prelude))
     p = Prover(load(CORPUS), CORPUS, load_statements())
 
     def check(goal):
         # every distinct claimed script for this goal; keep the first that passes
-        for script, src in dict.fromkeys(claims[goal]):
-            (_, ok, why), = p.attempt_batch(p.by_name[goal], [("verify", script)])
+        for script, src, prelude in dict.fromkeys(claims[goal]):
+            (_, ok, why), = p.attempt_batch(p.by_name[goal], [("verify", script)],
+                                            prelude=prelude, timeout=600,
+                                            single_timeout=600)
             if ok:
-                return goal, {"script": script, "source": src}
+                return goal, {"script": script, "source": src, "prelude": prelude}
         return goal, None
 
     verified, failed = {}, []

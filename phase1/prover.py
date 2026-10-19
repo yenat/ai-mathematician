@@ -306,7 +306,7 @@ class Prover:
 
     def attempt_batch(self, goal, cands, timeout=120, single_timeout=60,
                       max_retry_secs=480, heartbeats=200000, duper=False,
-                      guard=None, prelude=""):
+                      guard=None, prelude="", err_limit=1200):
         """Check every candidate for one goal in a single Lean process.
         Returns list of (label, ok, reason).
 
@@ -417,7 +417,7 @@ class Prover:
         for att, label in att_names:
             if att in errors:
                 results.append((label, False,
-                                "lean error: " + "\n---\n".join(errors[att])[:1200]))
+                                "lean error: " + "\n---\n".join(errors[att])[:err_limit]))
                 continue
             m = re.search(rf"GUARD\[{att}\] samestmt (\w+)", out)
             if not m or m.group(1) != "true":
