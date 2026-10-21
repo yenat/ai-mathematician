@@ -9,7 +9,7 @@ Built phase by phase:
 | Phase | Components | Status |
 |---|---|---|
 | 1 | Search + Download · ATP (Vampire) · ITP (Lean 4) · LLM proposer with Lean-error feedback · LLM informal proof → formal outline | Built and benchmarked; Download = retrieval from the library (external sources later) |
-| 2 | Inference controller (LLM + Hyperon) · Math Atomspace working memory / long-term memory · research papers → long-term memory | Not started |
+| 2 | Inference controller (LLM + Hyperon) · Math Atomspace working memory / long-term memory · research papers → long-term memory | Next |
 | 3 | PLN (probabilistic logic networks) feeding the inference controller | Not started |
 
 ## Phase 1 result

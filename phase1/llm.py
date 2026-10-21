@@ -1,4 +1,4 @@
-"""Phase 1 LLM plug-in: an UNTRUSTED proposer of Lean tactic scripts.
+"""Phase 1 LLM plug-in: proposes Lean tactic scripts; Lean checks every one.
 
 Implements the sketch's feedback arrow: propose -> Lean checks -> on
 failure, Lean's actual error goes back to the model for another round.
