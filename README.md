@@ -135,17 +135,21 @@ rejected; a genuine proof, or citing an earlier identical theorem, must be
 accepted. The first version of the guard passed cheating proofs; these
 tests caught it.
 
-Vampire and the LLM are **untrusted**: they only propose. Lean decides.
+Vampire and the LLM only propose proofs; every proof is verified by Lean.
 
 ## How it works (Phase 1)
 
 ```
-goal ──> Search ──> ranked facts ──> Vampire (untrusted) ──> premises that worked
-                                                                  │
-                        LLM (untrusted, optional) ── proposes ────┤
-                                  ▲                               ▼
-                                  └── Lean's error ◄── Lean 4 (trusted) + statement check + leak guard
+goal ──> Search ──> ranked facts ──┬──> Vampire ──> premises its proof used ──> Lean automation (grind, Duper, …)
+                                   │                                                     │ fails
+                                   └── top 160 facts, shown as Lean signatures ──> LLM ── proposes ──┐
+                                                                         ▲                           ▼
+                                                                         └── Lean's error ◄── Lean 4 + statement check + leak guard
 ```
+
+When Vampire finds a proof, the premises it used go to Lean's automation;
+when it does not (most of the hardest theorems), the LLM works from
+Search's top 160 facts directly.
 
 - `phase1/library.py`: loads every declaration from Megalodon's typed
   export, in order, with the symbols each mentions.
@@ -166,7 +170,9 @@ goal ──> Search ──> ranked facts ──> Vampire (untrusted) ──> pre
   `recheck.py` and `experiments/verify_vp_final.py` independently
   re-verify every LLM-found proof.
 - `phase1/vampire_proof.py`: parses Vampire's refutation and rewrites it
-  for an LLM prompt (library names, bookkeeping steps collapsed).
+  for an LLM prompt. Used only in the experiment showing that Vampire's
+  proof text does not help the LLM once its lemmas are given; not part of
+  the final loop.
 - `phase1/lean_sigs.py`: every library lemma's signature as Lean prints it,
   for prompts and for feedback on misapplied lemmas (cached in
   `results/lean_sigs.json`, rebuilt by running the script).
