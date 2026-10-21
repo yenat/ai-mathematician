@@ -29,3 +29,5 @@ results/*ledger*.jsonl
 
 # embedding caches (regenerable, large)
 results/emb_*.json
+results/lean_sigs.json
+tools/repl/
