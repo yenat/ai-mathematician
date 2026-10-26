@@ -276,6 +276,7 @@
 {"goal": "ZF_Sing_closed", "origin": "pipeline v4", "ok": true, "why": "", "secs": 0.8}
 {"goal": "ZF_binunion_closed", "origin": "pipeline v4", "ok": true, "why": "", "secs": 1.2}
 {"goal": "ZF_ordsucc_closed", "origin": "pipeline v4", "ok": true, "why": "", "secs": 0.9}
+{"goal": "nat_p_UnivOf_Empty", "origin": "earlier induction_hard, proved again now (wider budget)", "ok": true, "why": "", "secs": 1.2}
 {"goal": "omega_nat_p", "origin": "pipeline v4", "ok": true, "why": "", "secs": 1.1}
 {"goal": "nat_p_omega", "origin": "pipeline v4", "ok": true, "why": "", "secs": 1.1}
 {"goal": "omega_ordsucc", "origin": "pipeline v4", "ok": true, "why": "", "secs": 1.1}
@@ -425,6 +426,7 @@
 {"goal": "PNoEq_PSNo", "origin": "llm v8-v9", "ok": true, "why": "", "secs": 1.0}
 {"goal": "SNo_PSNo_eta_", "origin": "llm v8-v9", "ok": true, "why": "", "secs": 1.0}
 {"goal": "SNo_SNo", "origin": "pipeline v4", "ok": true, "why": "", "secs": 0.9}
+{"goal": "SNoLev_uniq_Subq", "origin": "earlier duper_hard, rebuilt now from its stored premise set", "ok": true, "why": "", "secs": 41.1}
 {"goal": "SNoLev_uniq", "origin": "pipeline v4", "ok": true, "why": "", "secs": 1.0}
 {"goal": "SNoLev_prop", "origin": "pipeline v4", "ok": true, "why": "", "secs": 1.0}
 {"goal": "SNoLev_ordinal", "origin": "pipeline v4", "ok": true, "why": "", "secs": 0.9}

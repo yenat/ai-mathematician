@@ -78,11 +78,21 @@ open Lean in
 
 def check(target, statement_sig, tactic, timeout=60):
     """Run one attempt. Returns (ok, reason, used_constants)."""
+    r = check_report(target, statement_sig, tactic, timeout)
+    return r["ok"], r["why"], r["used"]
+
+
+def check_report(target, statement_sig, tactic, timeout=60, imports=(), lean_path="",
+                 heartbeats=400000):
+    """Run one attempt and return the full audit: {ok, why, used, axioms,
+    lean_exit}. `used` is every library constant the proof depends on,
+    `axioms` every axiom it rests on (both empty if Lean did not finish).
+    `imports`/`lean_path` add packages a proof needs (e.g. Duper)."""
     att = f"attempt__{re.sub(r'[^A-Za-z0-9_]', '_', target)}"
     src = (
-        "import Lean\nimport Bridge\n"
-        "set_option Elab.async false\nset_option maxRecDepth 8000\n"
-        "set_option maxHeartbeats 400000\n"
+        "import Lean\nimport Bridge\n" + "".join(f"import {m}\n" for m in imports)
+        + "set_option Elab.async false\nset_option maxRecDepth 8000\n"
+        f"set_option maxHeartbeats {heartbeats}\n"
         "set_option linter.unusedVariables false\n"
         "namespace Megalodon\n"
         f"theorem {att}{statement_sig} := by\n"
@@ -94,21 +104,25 @@ def check(target, statement_sig, tactic, timeout=60):
                                      dir="/tmp") as fh:
         fh.write(src)
         path = fh.name
+    report = lambda ok, why, used=(), axioms=(), code=None: {
+        "ok": ok, "why": why, "used": list(used), "axioms": list(axioms), "lean_exit": code}
     try:
         r = subprocess.run([LEAN, path], capture_output=True, text=True,
-                           timeout=timeout, env={**os.environ, "LEAN_PATH": LIB})
+                           timeout=timeout, env={**os.environ, "LEAN_PATH": LIB + lean_path})
         out = r.stdout + r.stderr
     except subprocess.TimeoutExpired:
-        return False, "timeout", []
+        return report(False, "timeout")
     finally:
         os.unlink(path)
 
     if re.search(r":\d+:\d+: error", out):
         first = next(l for l in out.splitlines() if ": error" in l)
-        return False, "lean error: " + first.split(": error", 1)[1][:160], []
+        return report(False, "lean error: " + first.split(": error", 1)[1][:160], code=r.returncode)
     if r.returncode != 0:
-        return False, f"lean exited with status {r.returncode}", []
-    return guard_verdict(out)
+        return report(False, f"lean exited with status {r.returncode}", code=r.returncode)
+    ok, why, used = guard_verdict(out)
+    m = re.search(r"GUARD axioms ?(.*)", out)
+    return report(ok, why, used, m.group(1).split() if m else [], r.returncode)
 
 
 def library_axioms(meglib_path=os.path.join(LIB, "MegLib.lean")):

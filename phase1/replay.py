@@ -31,10 +31,13 @@ rows = [json.loads(l) for l in open(src)]
 def check(r):
     t0 = time.time()
     duper = r["duper"]
+    # a proof found under a larger budget records it (heartbeats: Lean's
+    # deterministic unit of work); the default otherwise
+    hb = r.get("heartbeats") or (1000000 if duper else 200000)
+    secs = 1800 if hb > 1000000 else 600 if duper else 300
     (_, ok, why), = prover.attempt_batch(
         by[r["goal"]], [("replay", r["script"])], prelude=r["prelude"], duper=duper,
-        timeout=600 if duper else 300, single_timeout=600 if duper else 300,
-        heartbeats=1000000 if duper else 200000)
+        timeout=secs + 30, single_timeout=secs, heartbeats=hb)
     return {"goal": r["goal"], "origin": r["origin"], "ok": ok,
             "why": "" if ok else why[:500], "secs": round(time.time() - t0, 1)}
 

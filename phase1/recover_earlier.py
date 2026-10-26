@@ -8,8 +8,10 @@ results/proof_bundle.jsonl.
   * v1 run (phase1_full_v1.jsonl): the stored strategy and premises, built
     with today's battery;
   * try_induction_hard.py: induction with 30 s of Vampire per case and
-    Lean trying cases Vampire could not do (--lean-anyway);
-  * try_duper_hard.py: Duper with a long time allowance.
+    Lean trying cases Vampire could not do (--lean-anyway); failing that,
+    every induction principle with 120 s per case;
+  * try_duper_hard.py: Duper with a long time allowance, every Duper
+    variant on every premise set.
 
   python3 recover_earlier.py [workers]
 """
@@ -92,17 +94,41 @@ def recover(goal):
                     return goal, {"goal": goal, "origin": "earlier induction_hard, proved again now",
                                   "script": script, "prelude": "", "duper": False}, "ok"
                 return goal, None, "recheck: " + why2[:100]
+        # wider budget: every induction principle, 120 s of Vampire per case,
+        # up to 512 facts (nat_p_UnivOf_Empty comes back this way, by
+        # complete induction)
+        ranked = [n for n, _ in p.search.rank(g.index, limit=512, goal_obj=g)]
+        for pname, xi, gi, cases in p.inductor.splits(g):
+            used = []
+            for c in cases:
+                u = p._vampire_case(c, ranked, (16, 32, 64, 128, 256, 512), timeout=120)
+                used.append(u if u is not None else
+                            [n for n in ranked if by[n].kind in ("THM", "AXIOM")][:16])
+            ok, why, script = p.induction_lean(g, {"principle": pname, "x": xi, "guard": gi,
+                                                   "case_premises": used})
+            if ok and verified(goal, script)[0]:
+                return goal, {"goal": goal, "origin": "earlier induction_hard, proved again now (wider budget)",
+                              "script": script, "prelude": "", "duper": False}, "ok"
         return goal, None, "induction split not closed now"
     if goal in hard_duper:
+        # first the premise set the original experiment ran on (its input
+        # file kept it; Vampire may pick different premises today)
+        for t in map(json.loads, open("../results/duper_target.jsonl")):
+            if t["goal"] == goal:
+                for label, s in duper_tactics(t["premise_sets"][0], t["defs"]):
+                    ok, why = verified(goal, s, duper=True)
+                    if ok:
+                        return goal, {"goal": goal, "origin": f"earlier duper_hard, rebuilt now from its stored premise set ({label})",
+                                      "script": s, "prelude": "", "duper": True,
+                                      "heartbeats": 4000000}, "ok"
         sets, defs, _ = p.premise_sets(g)
-        for k, premises in enumerate(sets, 1):
-            s = dict(duper_tactics(premises, defs)).get("duper-unfold")
-            if s:
+        for k, premises in enumerate(sets, 1):  # every Duper variant on every premise set
+            for label, s in duper_tactics(premises, defs):
                 ok, why = verified(goal, s, duper=True)
                 if ok:
-                    return goal, {"goal": goal, "origin": f"earlier duper_hard, proved again now (set {k})",
+                    return goal, {"goal": goal, "origin": f"earlier duper_hard, proved again now ({label}, set {k})",
                                   "script": s, "prelude": "", "duper": True}, "ok"
-        return goal, None, "Duper did not close it now"
+        return goal, None, "no Duper variant closes it now"
     return goal, None, "no stored record of how it was proved"
 
 
