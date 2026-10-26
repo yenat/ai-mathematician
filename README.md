@@ -41,6 +41,22 @@ v6 and v7 (`results/v6v7_verified.json`: 90 / 90), and of v8 and v9
 found (`results/phase1_v5_summary.json` lists them). Of the 877, 665 come
 from the pipeline without any LLM and 212 from the LLM loop, on theorems
 the pipeline had attempted and failed (`results/phase1_final_summary.json`).
+"Without any LLM" describes the run: some of the pipeline's fixed tactic
+strategies were distilled from earlier LLM-found proofs.
+
+**Replay.** 875 of the 877 proofs are stored as exact Lean scripts in
+`results/proof_bundle.jsonl` (`phase1/build_bundle.py`, `phase1/recover_earlier.py`),
+and one command re-checks all of them from scratch, each in a fresh Lean
+process, with the full guard: `cd phase1 && python3 replay.py 6`. Result:
+**875 / 875** (`results/replay.jsonl`), and also 875 / 875 against the
+previous version of the library (`results/replay_previous_library.jsonl`).
+The guard fails closed: incomplete Lean output is a rejection, and a proof
+may rest only on the library's own axioms and Lean's standard three
+(`phase1/test_guard.py`, `phase1/test_guard_output.py`). Two of the 25
+results from earlier experiments, `SNoLev_uniq_Subq` and
+`nat_p_UnivOf_Empty`, were verified when found, but their scripts were not
+kept and today's tools do not reproduce them with the original settings;
+they remain recorded results without a replayable script.
 
 Where v4's +77 came from, by proof line (v4 vs v3):
 
