@@ -224,6 +224,7 @@ endpoint).
 ```bash
 cd phase1
 python3 test_guard.py                 # leak-guard controls: must all pass
+python3 test_guard_output.py          # guard fails closed on incomplete Lean output (no Lean needed)
 python3 search.py ../data/corpus.sexpr   # Search recall vs. real proofs
 python3 experiment.py 33 6 out.jsonl  # sample: every 33rd theorem, 6 workers
 python3 experiment.py 1 6 out.jsonl   # full benchmark (~7h on 6 workers)
