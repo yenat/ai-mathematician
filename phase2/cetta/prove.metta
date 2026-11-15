@@ -1,8 +1,13 @@
 ;; Phase 2 on CeTTa: MeTTa drives Lean, with no Python during search.
 ;;
-;;   cetta --lang petta@1.0.6 prove.metta <name,name,...> <out.jsonl> [depth] [budget] [seconds]
+;;   cetta --lang petta@1.0.6 prove.metta <name,name,...> <out.jsonl> [depth] [budget] [seconds] [hint,hint,...] [lean|metta]
 ;;
-;; Defaults: depth 4, 300 Lean steps, 120 s per theorem.
+;; Defaults: depth 4, 300 steps, 120 s per theorem, backend lean.
+;; Tactics are MeTTa atoms (host.metta).  Backend lean: each is rendered to
+;; Lean text and run in the Lean REPL, and the script is checked by the Phase 1
+;; guard.  Backend metta: each is run by ../metta/tactics.metta, and the script
+;; is replayed into one proof term checked by the MeTTa kernel; Lean is not
+;; started.
 ;; Premise ranking is the Phase 1 MeTTa port of phase1/search.py; a finished
 ;; script counts only after that port's Phase 1 guard accepts it
 ;; (statement identity, no sorryAx, nothing cited from after the theorem).
@@ -17,6 +22,13 @@
 !(import! &self "/home/yenat/cetta-demo/repo/phase1/library.metta")
 !(import! &self "/home/yenat/cetta-demo/repo/phase1/search.metta")
 !(import! &self "/home/yenat/cetta-demo/repo/phase1/itp.metta")
+;; The MeTTa engine first: CeTTa compiles each file as it is imported, so a
+;; function must be defined before a file that calls it is imported.
+!(import! &self "/home/yenat/ai-mathematician/phase2/metta/tactics.metta")
+!(import! &self "mettahost.metta")
+!(bind! &goals (new-space))
+!(import! &lib "/home/yenat/ai-mathematician/phase2/metta/meglib.metta")
+!(import! &goals "/home/yenat/ai-mathematician/phase2/metta/goals.metta")
 !(import! &self "lean.metta")
 !(import! &self "host.metta")
 !(import! &self "controller.metta")
@@ -40,13 +52,27 @@
           ($b (map-atom $old2 $x (remove-atom &self $x)))
           ($old3 (collapse (match &self (P2Trace $k $s $t $o $m) (P2Trace $k $s $t $o $m))))
           ($c (map-atom $old3 $x (remove-atom &self $x)))
+          ($old4 (collapse (match &self (P2Via $s $t) (P2Via $s $t))))
+          ($c2 (map-atom $old4 $x (remove-atom &self $x)))
           ($d (p2:set target $index)) ($e (p2:set steps 0)) ($f (p2:set fresh 0))
           ($g (p2:set budget $budget)) ($h (p2:set aborted none))
           ($i (p2:set deadline (+ (p2:now-ms) (* 1000 $seconds))))
-          ($j (p2:set ranking $ranking)) ($k (add-atom &self (P2Lean $index $lean))))
+          ($j (p2:set ranking $ranking)) ($k (add-atom &self (P2Lean $index $lean)))
+          ($m (mt:reset)))
      done))
 
 (= (p2:start $name)
+   (if (== (p2:get backend) metta) (p2:start-metta $name) (p2:start-lean $name)))
+
+;; The statement as exported from Lean (../metta/export.py), the library
+;; before it loaded into the kernel's &kb.
+(= (p2:start-metta $name)
+   (let* ((($i $T) (mt:statement $name))
+          ($n (mt:load-library $i))
+          ($s (p2:set statement $T)))
+     (mt:start $T)))
+
+(= (p2:start-lean $name)
    (let* (((Lean $p $env) (p2:lean))
           ($sig (match &self (Statement $name $s) $s))
           ($src (str:join "" ("namespace Megalodon\ntheorem attempt__" (str:symbol->string $name) $sig
@@ -57,36 +83,47 @@
 
 (= (p2:trace-json)
    (let $rows (sort-atom (collapse (match &self (P2Trace $k $s $t $o $m) ($k $s $t $o $m))))
-     (JsonArray (map-atom $rows $r (let ($k $s $t $o $m) $r (JsonArray ($s $t $o $m)))))))
+     (JsonArray (map-atom $rows $r (let ($k $s $t $o $m) $r (JsonArray ($s (p2:render $t) $o $m)))))))
 
 (= (p2:prove-one $search $ctx $name $depth $budget $seconds)
    (let* (($index (match &self (Index $name $i) $i))
           ($ranking (ai-math:entry-names (ai-math:rank-with $search $index 400 ())))
           ($t0 (p2:now-ms))
-          ($lean (lean:open))
+          ($metta (== (p2:get backend) metta))
+          ($lean (if $metta none (lean:open)))
           ($reset (p2:reset $name $index $depth $budget $seconds $ranking $lean))
           ($st (p2:start $name))
           ($res (if (== (get-metatype $st) Expression) Fail (prove $st $depth)))
-          ($closed (lean:close $lean))
+          ($closed (if $metta done (lean:close $lean)))
           ($secs (/ (- (p2:now-ms) $t0) 1000))
           ($script (if (== $res Fail) () $res))
           ($verdict (if (== $res Fail) none
-                      (ai-math:itp-check $ctx (str:symbol->string $name) (str:join "\n" $script))))
-          ($proved (case $verdict (((AiITP:Accepted $n $u $a) true) ($other false))))
-          ($check (case $verdict ((none none) ((AiITP:Accepted $n $u $a) "ok") ($other (repr $other))))))
+                      (if $metta (mt:verdict (p2:get statement) $script)
+                        (ai-math:itp-check $ctx (str:symbol->string $name)
+                                           (str:join "\n" (map-atom $script $tac (p2:render $tac)))))))
+          ($proved (case $verdict (((AiITP:Accepted $n $u $a) true) ((Proved $x) true) ($other false))))
+          ($proof (case $verdict (((Proved (: $pterm $pstmt)) (repr $pterm)) ($other ""))))
+          ($check (case $verdict ((none none) ((AiITP:Accepted $n $u $a) "ok") ((Proved $x) "ok: MeTTa kernel")
+                                  ($other (repr $other))))))
      (JsonObject ((JsonPair "goal" (str:symbol->string $name))
                   (JsonPair "steps" (p2:get steps)) (JsonPair "secs" $secs)
                   (JsonPair "aborted" (p2:text (p2:get aborted)))
                   (JsonPair "proved" $proved)
-                  (JsonPair "script" (JsonArray $script))
+                  (JsonPair "hints" (JsonArray (collapse (match &self (P2Hint $h) (str:symbol->string $h)))))
+                  (JsonPair "backend" (p2:text (p2:get backend)))
+                  (JsonPair "script" (JsonArray (map-atom $script $tac (p2:render $tac))))
+                  (JsonPair "tactics" (repr $script))
+                  (JsonPair "proof" $proof)
                   (JsonPair "check" (p2:text $check))
                   (JsonPair "trace" (p2:trace-json))))))
 
-(= (p2:run $names $out $depth $budget $seconds)
-   (let* (($decls (ai-math:load-library (p2:corpus)))
+(= (p2:run $names $out $depth $budget $seconds $hints $backend)
+   (let* (($b (p2:set backend $backend))
+          ($decls (ai-math:load-library (p2:corpus)))
           ($search (ai-math:search $decls))
           ($ctx (ai-math:itp $decls (p2:guard-root) (p2:lean-bin)))
-          ($cleared (fs:write $out "")))
+          ($cleared (fs:write $out ""))
+          ($hinted (map-atom $hints $h (add-atom &self (P2Hint $h)))))
      (foldl-atom $names 0 $won $name
        (let* (($row (p2:prove-one $search $ctx $name $depth $budget $seconds))
               ($line (fs:append-text $out (str:concat (json:stringify $row) "\n")))
@@ -103,7 +140,9 @@
         ($budget (p2:number (p2:arg 3 "300")))
         ($seconds (p2:number (p2:arg 4 "120")))
         ($t0 (p2:now-ms))
-        ($won (p2:run $names $out $depth $budget $seconds)))
+        ($hints (case (p2:arg 5 "") (("" ()) ($h (map-atom (str:split "," $h) $n (str:string->symbol $n))))))
+        ($backend (str:string->symbol (p2:arg 6 "lean")))
+        ($won (p2:run $names $out $depth $budget $seconds $hints $backend)))
    (println! (str:join "" ("MeTTa-driven search on CeTTa proved " (str:number->string $won) "/"
                            (str:number->string (size-atom $names)) " in "
                            (str:number->string (/ (- (p2:now-ms) $t0) 1000)) "s"))))

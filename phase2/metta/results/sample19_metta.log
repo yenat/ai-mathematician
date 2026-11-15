@@ -1,0 +1,38 @@
+"andI PROVED (11 steps, 0.1790424079999793s)"
+"prop_ext_2 none (63 steps, 0.4095859560000245s)"
+"SingI none (4 steps, 0.1857967740001623s)"
+"binintersectE1 PROVED (10 steps, 0.2505978860000614s)"
+"nat_complete_ind budget (300 steps, 1.702562732999912s)"
+"atleastp_antisym_equip none (38 steps, 0.4517909490000457s)"
+"TransSet_In_ordsucc_Subq budget (300 steps, 1.984955996999983s)"
+"add_nat_0R none (259 steps, 1.897786291999975s)"
+"Pi_nat_0_inv budget (300 steps, 2.298253341999836s)"
+"binunion_finite budget (300 steps, 2.648015097000171s)"
+"Inj1_setsum budget (300 steps, 2.347061275999993s)"
+"ap1_Sigma none (22 steps, 0.5568077640000265s)"
+"PNoLeI2 none (3 steps, 0.4263239149998408s)"
+"PNo_strict_imv_pred_eq none (2 steps, 0.4777841759999283s)"
+"SNoLtI2 budget (300 steps, 4.065763032000047s)"
+"SNoL_I budget (300 steps, 2.793114879s)"
+"SNoR_0 PROVED (4 steps, 0.6253712349999696s)"
+"SNo_rec_i_eq budget (300 steps, 3.713102615999989s)"
+"minus_SNo_SNoS_ budget (300 steps, 3.003811011000071s)"
+"MeTTa-driven search on CeTTa proved 3/19 in 36.617117876s"
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true
+true

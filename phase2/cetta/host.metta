@@ -81,6 +81,16 @@
           ($o (map-atom $t $x (p2:canon $x $d $ren))))))
       ($other $t))))
 
+;; Does term $t mention symbol $s? Stops at the first occurrence.
+(= (p2:mentions $s $t)
+   (case (get-metatype $t)
+     ((Symbol (== $s $t))
+      (Expression (p2:any-mentions $s $t))
+      ($other false))))
+(= (p2:any-mentions $s $xs)
+   (if (== $xs ()) false
+     (if (p2:mentions $s (car-atom $xs)) true (p2:any-mentions $s (cdr-atom $xs)))))
+
 (= (p2:symbols $t)
    (case (get-metatype $t)
      ((Symbol ($t))
@@ -94,6 +104,45 @@
       ((→ $a $b) (p2:split $b $vs (union-atom $hs ($a))))
       ($other (Split $vs $hs $t)))))
 
+;; ---------------------------------------------------------------- tactics
+
+;; Tactics are MeTTa atoms (../metta/tactics.metta runs them).  For the Lean
+;; backend each is rendered to the Lean text the prover has always sent:
+;;   (Intro x5)                 intro x5
+;;   (Apply L) / (Apply h)      apply Megalodon.«L» / apply h
+;;   (Unpack h)                 (apply h; try clear h)
+;;   (Witness o k)              (intro qk hqk; apply hqk o)
+;;   (Have fk (L a ...))        have fk := @Megalodon.«L» a ...
+;;   (Rewrite L h k)            (have ek := @Megalodon.«L»; simp only [b_eq] at ek; rw [ek] at h)
+;;   (Unfold c)                 unfold Megalodon.«c» at *
+;;   (IffRefine rule L bs)      refine Megalodon.«rule» _ _ (@Megalodon.«L» bs ...) ?_
+;;   (Closer text)              text (grind: no MeTTa tactic)
+(= (p2:render $t)
+   (case $t
+     (((Intro $x) (str:concat "intro " (p2:text $x)))
+      ((Apply $n) (if (p2:library? $n)
+                      (str:concat "apply " (p2:lean-name (str:symbol->string $n)))
+                      (str:concat "apply " (p2:text $n))))
+      ((Unpack $n) (str:join "" ("(apply " (p2:text $n) "; try clear " (p2:text $n) ")")))
+      ((Witness $n $k)
+       (let $ks (str:number->string $k)
+         (str:join "" ("(intro q" $ks " hq" $ks "; apply hq" $ks " " (p2:text $n) ")"))))
+      ((Have $f $e)
+       (str:join "" ("have " (p2:text $f) " := @" (p2:lean-name (str:symbol->string (car-atom $e))) " "
+                     (str:join " " (map-atom (cdr-atom $e) $a (p2:text $a))))))
+      ((Rewrite $n $where $k)
+       (let* (($e (str:concat "e" (str:number->string $k)))
+              ($at (if (== $where goal) "" (str:concat " at " (p2:text $where)))))
+         (str:join "" ("(have " $e " := @" (p2:lean-name (str:symbol->string $n)) "; simp only [b_eq] at " $e
+                       "; rw [" $e "]" $at ")"))))
+      ((Unfold $c) (str:join "" ("unfold " (p2:lean-name (p2:from-metta $c)) " at *")))
+      ((IffRefine $rule $n $bs)
+       (str:join "" ("refine " (p2:lean-name (str:symbol->string $rule)) " _ _ (@"
+                     (p2:lean-name (str:symbol->string $n)) " "
+                     (str:join " " (map-atom $bs $b (str:symbol->string $b))) ") ?_")))
+      ((Closer $text) $text)
+      ($o (repr $t)))))
+
 ;; ---------------------------------------------------------------- Lean state
 
 ;; Process handles cannot be removed from a space, so each theorem's Lean is
@@ -101,6 +150,9 @@
 (= (p2:lean) (let $i (p2:get target) (match &self (P2Lean $i $l) $l)))
 
 (= (p2:read-obs $st)
+   (if (== (p2:get backend) metta) (mt:observe $st) (p2:read-obs-lean $st)))
+
+(= (p2:read-obs-lean $st)
    (let* (((Lean $p $env) (p2:lean))
           ($r (lean:send $p (JsonObject ((JsonPair "tactic" "goal_sexpr") (JsonPair "proofState" $st)))))
           ($infos (filter-atom (json:items (json:get $r "messages")) $m
@@ -135,7 +187,7 @@
            (if (p2:over-budget)
                (let $a (p2:abort budget) Loop)
                (let $facts (p2:facts-of $obs)
-                 (if (< (size-atom (p2:dedup $facts ())) (size-atom $facts))
+                 (if (< (size-atom (unique-atom $facts)) (size-atom $facts))
                      Loop                            ; a fact derived twice
                      (if (p2:repeats $st ($g (p2:types $obs)))
                          Loop
@@ -144,18 +196,32 @@
 (= (lean-try $st $tac)
    (if (or (not (== (p2:get aborted) none)) (p2:over-budget))
        (let $a (p2:abort budget) Fail)
+       (if (== (p2:get backend) metta) (p2:metta-try $st $tac)
        (let* (($k (p2:bump steps))
               ((Lean $p $env) (p2:lean))
               ($t0 (p2:now-ms))
-              ($r (lean:send $p (JsonObject ((JsonPair "tactic" $tac) (JsonPair "proofState" $st)))))
+              ($r (lean:send $p (JsonObject ((JsonPair "tactic" (p2:render $tac)) (JsonPair "proofState" $st)))))
               ($ms (- (p2:now-ms) $t0)))
          (if (== $r LeanTimeout)
              (let* (($a (p2:abort "lean timeout")) ($t (add-atom &self (P2Trace $k $st $tac false $ms)))) Fail)
              (let $ok (p2:step-ok $r)
                (let $t (add-atom &self (P2Trace $k $st $tac $ok $ms))
                  (if $ok
-                     (let* (($n (json:get $r "proofState")) ($s (add-atom &self (P2Parent $n $st)))) $n)
-                     Fail)))))))
+                     (let* (($n (json:get $r "proofState")) ($s (add-atom &self (P2Parent $n $st)))
+                            ($v (add-atom &self (P2Via $n $tac)))) $n)
+                     Fail))))))))
+
+;; The same step on the MeTTa backend (mettahost.metta): no Lean.
+(= (p2:metta-try $st $tac)
+   (let* (($k (p2:bump steps))
+          ($t0 (p2:now-ms))
+          ($n (mt:try $st $tac))
+          ($ms (- (p2:now-ms) $t0))
+          ($ok (not (== $n Fail)))
+          ($t (add-atom &self (P2Trace $k $st $tac $ok $ms))))
+     (if $ok
+         (let* (($s (add-atom &self (P2Parent $n $st))) ($v (add-atom &self (P2Via $n $tac)))) $n)
+         Fail)))
 
 (= (p2:step-ok $r)
    (let $ms (json:items (json:get $r "messages"))
@@ -206,23 +272,25 @@
 
 (= (intro-tactic $st)
    (let* (((Obs $g $hyps) (p2:seen $st)) ($k (p2:bump fresh)))
-     (str:concat (case $g (((∀ $v $b) "intro x") ($o "intro h"))) (str:number->string $k))))
+     (Intro (str:string->symbol (str:concat (case $g (((∀ $v $b) "x") ($o "h"))) (str:number->string $k))))))
 
 (= (closers $st $goal)
    (let* (((Obs $g $hyps) (p2:seen $st))
-          ($syms (foldl-atom (cons-atom $g (p2:types (Obs $g $hyps))) () $acc $x
-                   (union-atom $acc (p2:symbols $x))))
+          ($syms (unique-atom (foldl-atom (cons-atom $g (p2:types (Obs $g $hyps))) () $acc $x
+                   (union-atom $acc (p2:symbols $x)))))
           ($defs (sort-atom (p2:dedup (map-atom (filter-atom $syms $s (p2:def? $s)) $s (p2:from-metta $s)) ())))
           ($cap (str:join "" ("set_option maxHeartbeats " (str:number->string (p2:heartbeats)) " in ")))
           ($unfold (str:join "" (map-atom $defs $d (str:concat ", " (p2:lean-name $d)))))
           ($plain (str:join "" ($cap "((try simp only [" (p2:bridge) "] at *) <;> grind)")))
           ($with-defs (if (== $defs ()) ()
                         ((str:join "" ($cap "((try simp only [" (p2:bridge) $unfold "] at *) <;> grind)")))))
-          ($prem (p2:take (filter-atom (p2:get ranking) $n (p2:fact? (str:string->symbol $n))) (p2:premises)))
+          ($hinted (p2:ranked (collapse (match &self (P2Hint $h) (str:symbol->string $h)))))
+          ($ranked (p2:take (filter-atom (p2:get ranking) $n (p2:fact? (str:string->symbol $n))) (p2:premises)))
+          ($prem (p2:take (p2:dedup (union-atom $hinted $ranked) ()) (p2:premises)))
           ($haves (str:join "; " (p2:haves $prem 0)))
           ($with-prem (if (== $prem ()) ()
                         ((str:join "" ($cap "(" $haves "; (try simp only [" (p2:bridge) $unfold "] at *); grind)"))))))
-     (cons-atom $plain (union-atom $with-defs $with-prem))))
+     (map-atom (cons-atom $plain (union-atom $with-defs $with-prem)) $c (Closer $c))))
 
 (= (p2:def? $s) (not (== (collapse (match &self (Def $s) $s)) ())))
 (= (p2:haves $names $k)
@@ -230,12 +298,46 @@
      (cons-atom (str:join "" ("have p" (str:number->string $k) " := @" (p2:lean-name (car-atom $names))))
                 (p2:haves (cdr-atom $names) (+ $k 1)))))
 
-(= (apply-tactic $name)
-   (if (p2:library? $name)
-       (str:concat "apply " (p2:lean-name (str:symbol->string $name)))
-       (str:concat "apply " (p2:text $name))))
+(= (apply-tactic $name) (Apply $name))
+(= (unpack-tactic $n) (Unpack $n))
+(= (witness-tactic $n) (Witness $n (p2:bump fresh)))
 
-(= (unfold-tactic $c) (str:join "" ("unfold " (p2:lean-name (p2:from-metta $c)) " at *")))
+;; have f<k> := @L _ h1 _ h2 ... : the binders of L, '?_' filled in order.
+;; A hinted lemma with several hypotheses is used forward at most once on a
+;; path: a hint says the lemma is used in the proof, and lemmas such as
+;; "n m natural -> n*m natural" would otherwise combine every new fact with
+;; every other. One-hypothesis lemmas cannot do that, and a fact derived
+;; twice already ends a branch.
+(= (hint-forward-tactic $st $name $hs)
+   (if (and (> (size-atom $hs) 1) (p2:path-has $st $name))
+       (empty)
+       (let* (($args (map-atom (p2:fill-binders (p2:binders $name) $hs) $a (str:string->symbol $a)))
+              ($k (p2:bump fresh)))
+         (Have (p2:fresh-name f $k) (cons-atom $name $args)))))
+
+(= (p2:fresh-name $prefix $k)
+   (str:string->symbol (str:concat (str:symbol->string $prefix) (str:number->string $k))))
+
+(= (p2:fill-binders $bs $hs)
+   (if (== $bs ()) ()
+     (if (== (car-atom $bs) ?_)
+         (cons-atom (p2:text (car-atom $hs)) (p2:fill-binders (cdr-atom $bs) (cdr-atom $hs)))
+         (cons-atom "_" (p2:fill-binders (cdr-atom $bs) $hs)))))
+
+;; Was (Have f (name ...)) used to reach state $st?
+(= (p2:path-has $st $name)
+   (case (collapse (match &self (P2Via $st $t) $t))
+     ((($t) (if (p2:have-of? $t $name) true
+               (case (collapse (match &self (P2Parent $st $p) $p))
+                 ((($p) (p2:path-has $p $name)) ($o false)))))
+      ($o false))))
+(= (p2:have-of? $t $name)
+   (case $t (((Have $f $e) (== (car-atom $e) $name)) ($o false))))
+
+;; The library's equality is turned into Lean's (b_eq), then used by rw.
+(= (rewrite-tactic $name $where) (Rewrite $name $where (p2:bump fresh)))
+
+(= (unfold-tactic $c) (Unfold $c))
 
 (= (rank-lemmas $cands)
    (let* (($names (p2:dedup (map-atom $cands $c (let ($n $k) $c (str:symbol->string $n))) ()))
@@ -249,9 +351,8 @@
           ($names (map-atom $dirs $d (let ($n $rule) $d $n)))
           ($order (p2:take (p2:ranked $names) (p2:top-lemmas))))
      (map-atom $order $n
-       (str:join "" ("refine " (p2:lean-name (p2:rule-of $n $dirs)) " _ _ (@" (p2:lean-name $n) " "
-                     (str:join " " (map-atom (p2:binders (str:string->symbol $n)) $b (str:symbol->string $b)))
-                     ") ?_")))))
+       (IffRefine (str:string->symbol (p2:rule-of $n $dirs)) (str:string->symbol $n)
+                  (p2:binders (str:string->symbol $n))))))
 
 (= (p2:first-dirs $pairs $seen)
    (if (== $pairs ()) ()
@@ -275,9 +376,8 @@
      (map-atom $order $n
        (let* (($h (p2:rule-of $n $firsts))
               ($k (p2:bump fresh))
-              ($args (map-atom (p2:binders (str:string->symbol $n)) $b
-                       (if (== $b ?_) (p2:text $h) (str:symbol->string $b)))))
-         (str:join "" ("have f" (str:number->string $k) " := @" (p2:lean-name $n) " " (str:join " " $args)))))))
+              ($args (map-atom (p2:binders (str:string->symbol $n)) $b (if (== $b ?_) $h $b))))
+         (Have (p2:fresh-name f $k) (cons-atom (str:string->symbol $n) $args))))))
 
 (= (concat $a $b $c $d $e $f $g)
    (union-atom $a (union-atom $b (union-atom $c (union-atom $d (union-atom $e (union-atom $f $g)))))))
