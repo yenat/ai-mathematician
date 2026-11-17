@@ -114,6 +114,8 @@
 ;;   (Witness o k)              (intro qk hqk; apply hqk o)
 ;;   (Have fk (L a ...))        have fk := @Megalodon.«L» a ...
 ;;   (Rewrite L h k)            (have ek := @Megalodon.«L»; simp only [b_eq] at ek; rw [ek] at h)
+;;   (RewriteRev L h k)         the same with rw [← ek]
+;;   (Witness (f a ...) k)      a witness term: Megalodon names, applications in parentheses
 ;;   (Unfold c)                 unfold Megalodon.«c» at *
 ;;   (IffRefine rule L bs)      refine Megalodon.«rule» _ _ (@Megalodon.«L» bs ...) ?_
 ;;   (Closer text)              text (grind: no MeTTa tactic)
@@ -126,7 +128,7 @@
       ((Unpack $n) (str:join "" ("(apply " (p2:text $n) "; try clear " (p2:text $n) ")")))
       ((Witness $n $k)
        (let $ks (str:number->string $k)
-         (str:join "" ("(intro q" $ks " hq" $ks "; apply hq" $ks " " (p2:text $n) ")"))))
+         (str:join "" ("(intro q" $ks " hq" $ks "; apply hq" $ks " " (p2:lean-term $n) ")"))))
       ((Have $f $e)
        (str:join "" ("have " (p2:text $f) " := @" (p2:lean-name (str:symbol->string (car-atom $e))) " "
                      (str:join " " (map-atom (cdr-atom $e) $a (p2:text $a))))))
@@ -135,6 +137,11 @@
               ($at (if (== $where goal) "" (str:concat " at " (p2:text $where)))))
          (str:join "" ("(have " $e " := @" (p2:lean-name (str:symbol->string $n)) "; simp only [b_eq] at " $e
                        "; rw [" $e "]" $at ")"))))
+      ((RewriteRev $n2 $where2 $k2)
+       (let* (($e2 (str:concat "e" (str:number->string $k2)))
+              ($at2 (if (== $where2 goal) "" (str:concat " at " (p2:text $where2)))))
+         (str:join "" ("(have " $e2 " := @" (p2:lean-name (str:symbol->string $n2)) "; simp only [b_eq] at " $e2
+                       "; rw [← " $e2 "]" $at2 ")"))))
       ((Unfold $c) (str:join "" ("unfold " (p2:lean-name (p2:from-metta $c)) " at *")))
       ((IffRefine $rule $n $bs)
        (str:join "" ("refine " (p2:lean-name (str:symbol->string $rule)) " _ _ (@"
@@ -142,6 +149,13 @@
                      (str:join " " (map-atom $bs $b (str:symbol->string $b))) ") ?_")))
       ((Closer $text) $text)
       ($o (repr $t)))))
+
+;; A MeTTa term as Lean text: names as Lean knows them (meg_ dropped).
+(= (p2:lean-term $t)
+   (case (get-metatype $t)
+     ((Symbol (p2:from-metta $t))
+      (Expression (str:join "" ("(" (str:join " " (map-atom $t $u (p2:lean-term $u))) ")")))
+      ($other (repr $t)))))
 
 ;; ---------------------------------------------------------------- Lean state
 
@@ -188,7 +202,7 @@
                (let $a (p2:abort budget) Loop)
                (let $facts (p2:facts-of $obs)
                  (if (< (size-atom (unique-atom $facts)) (size-atom $facts))
-                     Loop                            ; a fact derived twice
+                     (let $m (p2:mark-dead $st) Loop) ; a fact derived twice
                      (if (p2:repeats $st ($g (p2:types $obs)))
                          Loop
                          (Goal $g)))))))))))
@@ -208,7 +222,7 @@
                (let $t (add-atom &self (P2Trace $k $st $tac $ok $ms))
                  (if $ok
                      (let* (($n (json:get $r "proofState")) ($s (add-atom &self (P2Parent $n $st)))
-                            ($v (add-atom &self (P2Via $n $tac)))) $n)
+                            ($v (add-atom &self (P2Via $n $tac))) ($u (p2:record-applied $n $st $tac))) $n)
                      Fail))))))))
 
 ;; The same step on the MeTTa backend (mettahost.metta): no Lean.
@@ -220,7 +234,8 @@
           ($ok (not (== $n Fail)))
           ($t (add-atom &self (P2Trace $k $st $tac $ok $ms))))
      (if $ok
-         (let* (($s (add-atom &self (P2Parent $n $st))) ($v (add-atom &self (P2Via $n $tac)))) $n)
+         (let* (($s (add-atom &self (P2Parent $n $st))) ($v (add-atom &self (P2Via $n $tac)))
+                ($u (p2:record-applied $n $st $tac))) $n)
          Fail)))
 
 (= (p2:step-ok $r)
@@ -309,7 +324,8 @@
 ;; every other. One-hypothesis lemmas cannot do that, and a fact derived
 ;; twice already ends a branch.
 (= (hint-forward-tactic $st $name $hs)
-   (if (and (> (size-atom $hs) 1) (p2:path-has $st $name))
+   (if (or (and (> (size-atom $hs) 1) (p2:path-has $st $name))
+           (p2:path-applied-all $st $name $hs))
        (empty)
        (let* (($args (map-atom (p2:fill-binders (p2:binders $name) $hs) $a (str:string->symbol $a)))
               ($k (p2:bump fresh)))
@@ -334,8 +350,56 @@
 (= (p2:have-of? $t $name)
    (case $t (((Have $f $e) (== (car-atom $e) $name)) ($o false))))
 
+;; The lemma applications (have f := L args) on the path to a state, kept
+;; with the state when it is made: (P2Applied state ((f L args) ...)).
+(= (p2:applied-of $st)
+   (case (collapse (match &self (P2Applied $st $l) $l)) ((($l) $l) ($o ()))))
+(= (p2:record-applied $n $st $tac)
+   (let* (($old (p2:applied-of $st))
+          ($new (case $tac (((Have $f $e) (cons-atom (cons-atom $f $e) $old))
+                            ((Unpack $h) (cons-atom (Unpacked $h) $old))
+                            ($o $old)))))
+     (add-atom &self (P2Applied $n $new))))
+
+;; Was hypothesis $h unpacked on the path to $st?
+(= (p2:unpacked-on-path $st $h)
+   (p2:member (Unpacked $h) (p2:applied-of $st)))
+
+;; State $st re-derived a known fact by (have f := L args): the parent
+;; records that application as done, so its later children skip it.
+(= (p2:mark-dead $st)
+   (case (collapse (match &self (P2Via $st $t) $t))
+     ((((Have $f $e))
+       (let* (($p (match &self (P2Parent $st $p) $p))
+              ($old (p2:applied-of $p))
+              ($new (cons-atom (cons-atom $f $e) $old))
+              ($rm (map-atom (collapse (match &self (P2Applied $p $l) (P2Applied $p $l)))
+                             $x (remove-atom &self $x))))
+         (add-atom &self (P2Applied $p $new))))
+      ($o done))))
+
+;; Was lemma $name applied to hypothesis $h on the path to $st, or is $h a
+;; fact that $name itself produced? The second stops a lemma feeding on its
+;; own conclusions (SNo x -> SNo (-x) -> SNo (-(-x)) ...).
+(= (p2:path-applied $st $name $h)
+   (not (== (filter-atom (p2:applied-of $st) $e
+              (and (== (car-atom (cdr-atom $e)) $name)
+                   (or (== (car-atom $e) $h) (p2:member $h (cdr-atom (cdr-atom $e))))))
+            ())))
+
+;; The same lemma already applied to all of $hs on this path: its conclusion
+;; is a known fact.
+(= (p2:path-applied-all $st $name $hs)
+   (if (== $hs ()) false (p2:all-applied $st $name $hs)))
+(= (p2:all-applied $st $name $hs)
+   (if (== $hs ()) true
+     (if (p2:path-applied $st $name (car-atom $hs))
+         (p2:all-applied $st $name (cdr-atom $hs))
+         false)))
+
 ;; The library's equality is turned into Lean's (b_eq), then used by rw.
 (= (rewrite-tactic $name $where) (Rewrite $name $where (p2:bump fresh)))
+(= (rewrite-rev-tactic $name $where) (RewriteRev $name $where (p2:bump fresh)))
 
 (= (unfold-tactic $c) (Unfold $c))
 
